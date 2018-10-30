@@ -61,9 +61,11 @@ class BalloonConfig(Config):
     # Give the configuration a recognizable name
     NAME = "balloon"
 
+    GPU_COUNT = 3
+
     # We use a GPU with 12GB memory, which can fit two images.
     # Adjust down if you use a smaller GPU.
-    IMAGES_PER_GPU = 2
+    IMAGES_PER_GPU = 1
 
     # Number of classes (including background)
     NUM_CLASSES = 1 + 1  # Background + balloon
