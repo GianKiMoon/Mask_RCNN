@@ -973,7 +973,74 @@ def build_fpn_mask_graph(rois, feature_maps, image_meta,
     x = PyramidROIAlign([pool_size, pool_size],
                         name="roi_align_mask")([rois, image_meta] + feature_maps)
 
-    # Conv layers
+    u = x
+    v = x
+
+    # Need to create 3 paths
+    # Conv layers for U
+
+    u = KL.TimeDistributed(KL.Conv2D(256, (3, 3), padding="same"),
+                           name="mrcnn_mask_conv1")(u)
+    u = KL.TimeDistributed(BatchNorm(),
+                           name='mrcnn_mask_bn1')(u, training=train_bn)
+    u = KL.Activation('relu')(u)
+
+    u = KL.TimeDistributed(KL.Conv2D(256, (3, 3), padding="same"),
+                           name="mrcnn_mask_conv2")(u)
+    u = KL.TimeDistributed(BatchNorm(),
+                           name='mrcnn_mask_bn2')(u, training=train_bn)
+    u = KL.Activation('relu')(u)
+
+    u = KL.TimeDistributed(KL.Conv2D(256, (3, 3), padding="same"),
+                           name="mrcnn_mask_conv3")(u)
+    u = KL.TimeDistributed(BatchNorm(),
+                           name='mrcnn_mask_bn3')(u, training=train_bn)
+    u = KL.Activation('relu')(u)
+
+    u = KL.TimeDistributed(KL.Conv2D(256, (3, 3), padding="same"),
+                           name="mrcnn_mask_conv4")(u)
+    u = KL.TimeDistributed(BatchNorm(),
+                           name='mrcnn_mask_bn4')(u, training=train_bn)
+    u = KL.Activation('relu')(u)
+
+    u = KL.TimeDistributed(KL.Conv2DTranspose(256, (2, 2), strides=2, activation="relu"),
+                           name="mrcnn_mask_deconv")(u)
+    u = KL.TimeDistributed(KL.Conv2D(num_classes, (1, 1), strides=1, activation="sigmoid"),
+                           name="mrcnn_mask")(u)
+
+    # Conv layers for V
+
+    v = KL.TimeDistribvted(KL.Conv2D(256, (3, 3), padding="same"),
+                           name="mrcnn_mask_conv1")(v)
+    v = KL.TimeDistribvted(BatchNorm(),
+                           name='mrcnn_mask_bn1')(v, training=train_bn)
+    v = KL.Activation('relv')(v)
+
+    v = KL.TimeDistribvted(KL.Conv2D(256, (3, 3), padding="same"),
+                           name="mrcnn_mask_conv2")(v)
+    v = KL.TimeDistribvted(BatchNorm(),
+                           name='mrcnn_mask_bn2')(v, training=train_bn)
+    v = KL.Activation('relv')(v)
+
+    v = KL.TimeDistribvted(KL.Conv2D(256, (3, 3), padding="same"),
+                           name="mrcnn_mask_conv3")(v)
+    v = KL.TimeDistribvted(BatchNorm(),
+                           name='mrcnn_mask_bn3')(v, training=train_bn)
+    v = KL.Activation('relv')(v)
+
+    v = KL.TimeDistribvted(KL.Conv2D(256, (3, 3), padding="same"),
+                           name="mrcnn_mask_conv4")(v)
+    v = KL.TimeDistribvted(BatchNorm(),
+                           name='mrcnn_mask_bn4')(v, training=train_bn)
+    v = KL.Activation('relv')(v)
+
+    v = KL.TimeDistribvted(KL.Conv2DTranspose(256, (2, 2), strides=2, activation="relv"),
+                           name="mrcnn_mask_deconv")(v)
+    v = KL.TimeDistribvted(KL.Conv2D(num_classes, (1, 1), strides=1, activation="sigmoid"),
+                           name="mrcnn_mask")(v)
+
+
+    # Conv layers for U
     x = KL.TimeDistributed(KL.Conv2D(256, (3, 3), padding="same"),
                            name="mrcnn_mask_conv1")(x)
     x = KL.TimeDistributed(BatchNorm(),
@@ -1002,7 +1069,7 @@ def build_fpn_mask_graph(rois, feature_maps, image_meta,
                            name="mrcnn_mask_deconv")(x)
     x = KL.TimeDistributed(KL.Conv2D(num_classes, (1, 1), strides=1, activation="sigmoid"),
                            name="mrcnn_mask")(x)
-    return x
+    return u, v, x
 
 
 ############################################################
@@ -1997,7 +2064,7 @@ class MaskRCNN():
                                      train_bn=config.TRAIN_BN,
                                      fc_layers_size=config.FPN_CLASSIF_FC_LAYERS_SIZE)
 
-            mrcnn_mask = build_fpn_mask_graph(rois, mrcnn_feature_maps,
+            mrcnn_mask_u, mrcnn_mask_v, mrcnn_mask_i = build_fpn_mask_graph(rois, mrcnn_feature_maps,
                                               input_image_meta,
                                               config.MASK_POOL_SIZE,
                                               config.NUM_CLASSES,
@@ -2015,8 +2082,12 @@ class MaskRCNN():
                 [target_class_ids, mrcnn_class_logits, active_class_ids])
             bbox_loss = KL.Lambda(lambda x: mrcnn_bbox_loss_graph(*x), name="mrcnn_bbox_loss")(
                 [target_bbox, target_class_ids, mrcnn_bbox])
-            mask_loss = KL.Lambda(lambda x: mrcnn_mask_loss_graph(*x), name="mrcnn_mask_loss")(
-                [target_mask, target_class_ids, mrcnn_mask])
+            mask_loss_u = KL.Lambda(lambda x: mrcnn_mask_loss_graph(*x), name="mrcnn_mask_u_loss")(
+                [target_mask, target_class_ids, mrcnn_mask_u])
+            mask_loss_v = KL.Lambda(lambda x: mrcnn_mask_loss_graph(*x), name="mrcnn_mask_v_loss")(
+                [target_mask, target_class_ids, mrcnn_mask_v])
+            mask_loss_i = KL.Lambda(lambda x: mrcnn_mask_loss_graph(*x), name="mrcnn_mask_i_loss")(
+                [target_mask, target_class_ids, mrcnn_mask_i])
 
             # Model
             inputs = [input_image, input_image_meta,
@@ -2024,9 +2095,9 @@ class MaskRCNN():
             if not config.USE_RPN_ROIS:
                 inputs.append(input_rois)
             outputs = [rpn_class_logits, rpn_class, rpn_bbox,
-                       mrcnn_class_logits, mrcnn_class, mrcnn_bbox, mrcnn_mask,
+                       mrcnn_class_logits, mrcnn_class, mrcnn_bbox, mrcnn_mask_u, mrcnn_mask_v, mrcnn_mask_i,
                        rpn_rois, output_rois,
-                       rpn_class_loss, rpn_bbox_loss, class_loss, bbox_loss, mask_loss]
+                       rpn_class_loss, rpn_bbox_loss, class_loss, bbox_loss, mask_loss_u, mask_loss_v, mask_loss_i]
             model = KM.Model(inputs, outputs, name='mask_rcnn')
         else:
             # Network Heads
@@ -2045,7 +2116,7 @@ class MaskRCNN():
 
             # Create masks for detections
             detection_boxes = KL.Lambda(lambda x: x[..., :4])(detections)
-            mrcnn_mask = build_fpn_mask_graph(detection_boxes, mrcnn_feature_maps,
+            mrcnn_mask_u, mrcnn_mask_v, mrcnn_mask_i = build_fpn_mask_graph(detection_boxes, mrcnn_feature_maps,
                                               input_image_meta,
                                               config.MASK_POOL_SIZE,
                                               config.NUM_CLASSES,
@@ -2053,7 +2124,8 @@ class MaskRCNN():
 
             model = KM.Model([input_image, input_image_meta, input_anchors],
                              [detections, mrcnn_class, mrcnn_bbox,
-                                 mrcnn_mask, rpn_rois, rpn_class, rpn_bbox],
+                              mrcnn_mask_u, mrcnn_mask_v, mrcnn_mask_i,
+                              rpn_rois, rpn_class, rpn_bbox],
                              name='mask_rcnn')
 
         # Add multi-GPU support.
