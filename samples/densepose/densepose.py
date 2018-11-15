@@ -69,14 +69,14 @@ class DenseposeConfig(Config):
     # Give the configuration a recognizable name
     NAME = "densepose"
 
-    GPU_COUNT = 3
+    GPU_COUNT = 1
 
     # We use a GPU with 12GB memory, which can fit two images.
     # Adjust down if you use a smaller GPU.
-    IMAGES_PER_GPU = 2
+    IMAGES_PER_GPU = 1
 
     # Number of classes (including background)
-    NUM_CLASSES = 1 + 1  # Background + human
+    NUM_CLASSES = 1 + 80  # Background + human
 
     # Number of training steps per epoch
     STEPS_PER_EPOCH = 100
@@ -105,8 +105,6 @@ class DenseposeDataset(utils.Dataset):
         """
 
         coco = COCO("{}/annotations/densepose_coco_2014_{}.json".format(dataset_dir, subset))
-        if subset == "minival" or subset == "valminusminival":
-            subset = "val"
         image_dir = "{}/{}2014".format(dataset_dir, subset)
 
         # Load all classes or a subset?
@@ -147,12 +145,12 @@ def train(model):
     """Train the model."""
     # Training dataset.
     dataset_train = DenseposeDataset()
-    dataset_train.load_balloon(args.dataset, "train")
+    dataset_train.load_densepose_coco(args.dataset, "train")
     dataset_train.prepare()
 
     # Validation dataset
     dataset_val = DenseposeDataset()
-    dataset_val.load_balloon(args.dataset, "val")
+    dataset_val.load_densepose_coco(args.dataset, "valminusminival")
     dataset_val.prepare()
 
     # *** This training schedule is an example. Update to your needs ***
@@ -302,7 +300,7 @@ if __name__ == '__main__':
         # number of classes
         model.load_weights(weights_path, by_name=True, exclude=[
             "mrcnn_class_logits", "mrcnn_bbox_fc",
-            "mrcnn_bbox", "mrcnn_mask"])
+            "mrcnn_bbox", "mrcnn_mask", "mrcnn_mask_v", "mrcnn_mask_u"])
     else:
         model.load_weights(weights_path, by_name=True)
 
