@@ -34,6 +34,14 @@ import datetime
 import numpy as np
 import skimage.draw
 
+from pycocotools.coco import COCO
+from pycocotools.cocoeval import COCOeval
+from pycocotools import mask as maskUtils
+
+import zipfile
+import urllib.request
+import shutil
+
 # Root directory of the project
 ROOT_DIR = os.path.abspath("../../")
 
@@ -83,99 +91,56 @@ class DenseposeConfig(Config):
 
 class DenseposeDataset(utils.Dataset):
 
-    def load_balloon(self, dataset_dir, subset):
-        """Load a subset of the Balloon dataset.
-        dataset_dir: Root directory of the dataset.
-        subset: Subset to load: train or val
+    def load_densepose_coco(self, dataset_dir, subset, class_ids=None,
+                  class_map=None, return_coco=False, auto_download=False):
+        """Load a subset of the COCO dataset.
+        dataset_dir: The root directory of the COCO dataset.
+        subset: What to load (train, val, minival, valminusminival)
+        year: What dataset year to load (2014, 2017) as a string, not an integer
+        class_ids: If provided, only loads images that have the given classes.
+        class_map: TODO: Not implemented yet. Supports maping classes from
+            different datasets to the same class ID.
+        return_coco: If True, returns the COCO object.
+        auto_download: Automatically download and unzip MS-COCO images and annotations
         """
-        # Add classes. We have only one class to add.
-        self.add_class("balloon", 1, "balloon")
 
-        # Train or validation dataset?
-        assert subset in ["train", "val"]
-        dataset_dir = os.path.join(dataset_dir, subset)
+        coco = COCO("{}/annotations/densepose_coco_2014_{}.json".format(dataset_dir, subset))
+        if subset == "minival" or subset == "valminusminival":
+            subset = "val"
+        image_dir = "{}/{}2014".format(dataset_dir, subset)
 
-        # Load annotations
-        # VGG Image Annotator (up to version 1.6) saves each image in the form:
-        # { 'filename': '28503151_5b5b7ec140_b.jpg',
-        #   'regions': {
-        #       '0': {
-        #           'region_attributes': {},
-        #           'shape_attributes': {
-        #               'all_points_x': [...],
-        #               'all_points_y': [...],
-        #               'name': 'polygon'}},
-        #       ... more regions ...
-        #   },
-        #   'size': 100202
-        # }
-        # We mostly care about the x and y coordinates of each region
-        # Note: In VIA 2.0, regions was changed from a dict to a list.
-        annotations = json.load(open(os.path.join(dataset_dir, "via_region_data.json")))
-        annotations = list(annotations.values())  # don't need the dict keys
+        # Load all classes or a subset?
+        if not class_ids:
+            # All classes
+            class_ids = sorted(coco.getCatIds())
 
-        # The VIA tool saves images in the JSON even if they don't have any
-        # annotations. Skip unannotated images.
-        annotations = [a for a in annotations if a['regions']]
+        # All images or a subset?
+        if class_ids:
+            image_ids = []
+            for id in class_ids:
+                image_ids.extend(list(coco.getImgIds(catIds=[id])))
+            # Remove duplicates
+            image_ids = list(set(image_ids))
+        else:
+            # All images
+            image_ids = list(coco.imgs.keys())
+
+        # Add classes
+        for i in class_ids:
+            self.add_class("coco", i, coco.loadCats(i)[0]["name"])
 
         # Add images
-        for a in annotations:
-            # Get the x, y coordinaets of points of the polygons that make up
-            # the outline of each object instance. These are stores in the
-            # shape_attributes (see json format above)
-            # The if condition is needed to support VIA versions 1.x and 2.x.
-            if type(a['regions']) is dict:
-                polygons = [r['shape_attributes'] for r in a['regions'].values()]
-            else:
-                polygons = [r['shape_attributes'] for r in a['regions']] 
-
-            # load_mask() needs the image size to convert polygons to masks.
-            # Unfortunately, VIA doesn't include it in JSON, so we must read
-            # the image. This is only managable since the dataset is tiny.
-            image_path = os.path.join(dataset_dir, a['filename'])
-            image = skimage.io.imread(image_path)
-            height, width = image.shape[:2]
-
+        for i in image_ids:
             self.add_image(
-                "balloon",
-                image_id=a['filename'],  # use file name as a unique image id
-                path=image_path,
-                width=width, height=height,
-                polygons=polygons)
+                "coco", image_id=i,
+                path=os.path.join(image_dir, coco.imgs[i]['file_name']),
+                width=coco.imgs[i]["width"],
+                height=coco.imgs[i]["height"],
+                annotations=coco.loadAnns(coco.getAnnIds(
+                    imgIds=[i], catIds=class_ids, iscrowd=None)))
+        if return_coco:
+            return coco
 
-    def load_mask(self, image_id):
-        """Generate instance masks for an image.
-       Returns:
-        masks: A bool array of shape [height, width, instance count] with
-            one mask per instance.
-        class_ids: a 1D array of class IDs of the instance masks.
-        """
-        # If not a balloon dataset image, delegate to parent class.
-        image_info = self.image_info[image_id]
-        if image_info["source"] != "balloon":
-            return super(self.__class__, self).load_mask(image_id)
-
-        # Convert polygons to a bitmap mask of shape
-        # [height, width, instance_count]
-        info = self.image_info[image_id]
-        mask = np.zeros([info["height"], info["width"], len(info["polygons"])],
-                        dtype=np.uint8)
-        for i, p in enumerate(info["polygons"]):
-            # Get indexes of pixels inside the polygon and set them to 1
-            rr, cc = skimage.draw.polygon(p['all_points_y'], p['all_points_x'])
-            mask[rr, cc, i] = 1
-
-        # Return mask, and array of class IDs of each instance. Since we have
-        # one class ID only, we return an array of 1s
-        return mask.astype(np.bool), np.ones([mask.shape[-1]], dtype=np.int32)
-
-    def image_reference(self, image_id):
-        """Return the path of the image."""
-        info = self.image_info[image_id]
-        if info["source"] == "balloon":
-            return info["path"]
-        else:
-            super(self.__class__, self).image_reference(image_id)
 
 
 def train(model):

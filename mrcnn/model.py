@@ -973,6 +973,7 @@ def build_fpn_mask_graph(rois, feature_maps, image_meta,
     x = PyramidROIAlign([pool_size, pool_size],
                         name="roi_align_mask")([rois, image_meta] + feature_maps)
 
+    # TODO: make it happen
     u = x
     v = x
 
@@ -980,64 +981,64 @@ def build_fpn_mask_graph(rois, feature_maps, image_meta,
     # Conv layers for U
 
     u = KL.TimeDistributed(KL.Conv2D(256, (3, 3), padding="same"),
-                           name="mrcnn_mask_conv1")(u)
+                           name="mrcnn_mask_u_conv1")(u)
     u = KL.TimeDistributed(BatchNorm(),
-                           name='mrcnn_mask_bn1')(u, training=train_bn)
+                           name='mrcnn_mask_u_bn1')(u, training=train_bn)
     u = KL.Activation('relu')(u)
 
     u = KL.TimeDistributed(KL.Conv2D(256, (3, 3), padding="same"),
-                           name="mrcnn_mask_conv2")(u)
+                           name="mrcnn_mask_u_conv2")(u)
     u = KL.TimeDistributed(BatchNorm(),
-                           name='mrcnn_mask_bn2')(u, training=train_bn)
+                           name='mrcnn_mask_u_bn2')(u, training=train_bn)
     u = KL.Activation('relu')(u)
 
     u = KL.TimeDistributed(KL.Conv2D(256, (3, 3), padding="same"),
-                           name="mrcnn_mask_conv3")(u)
+                           name="mrcnn_mask_u_conv3")(u)
     u = KL.TimeDistributed(BatchNorm(),
-                           name='mrcnn_mask_bn3')(u, training=train_bn)
+                           name='mrcnn_mask_u_bn3')(u, training=train_bn)
     u = KL.Activation('relu')(u)
 
     u = KL.TimeDistributed(KL.Conv2D(256, (3, 3), padding="same"),
-                           name="mrcnn_mask_conv4")(u)
+                           name="mrcnn_mask_u_conv4")(u)
     u = KL.TimeDistributed(BatchNorm(),
-                           name='mrcnn_mask_bn4')(u, training=train_bn)
+                           name='mrcnn_mask_u_bn4')(u, training=train_bn)
     u = KL.Activation('relu')(u)
 
     u = KL.TimeDistributed(KL.Conv2DTranspose(256, (2, 2), strides=2, activation="relu"),
-                           name="mrcnn_mask_deconv")(u)
+                           name="mrcnn_mask_u_deconv")(u)
     u = KL.TimeDistributed(KL.Conv2D(num_classes, (1, 1), strides=1, activation="sigmoid"),
-                           name="mrcnn_mask")(u)
+                           name="mrcnn_mask_u")(u)
 
     # Conv layers for V
 
-    v = KL.TimeDistribvted(KL.Conv2D(256, (3, 3), padding="same"),
-                           name="mrcnn_mask_conv1")(v)
-    v = KL.TimeDistribvted(BatchNorm(),
-                           name='mrcnn_mask_bn1')(v, training=train_bn)
-    v = KL.Activation('relv')(v)
+    v = KL.TimeDistributed(KL.Conv2D(256, (3, 3), padding="same"),
+                           name="mrcnn_mask_v_conv1")(v)
+    v = KL.TimeDistributed(BatchNorm(),
+                           name='mrcnn_mask_v_bn1')(v, training=train_bn)
+    v = KL.Activation('relu')(v)
 
-    v = KL.TimeDistribvted(KL.Conv2D(256, (3, 3), padding="same"),
-                           name="mrcnn_mask_conv2")(v)
-    v = KL.TimeDistribvted(BatchNorm(),
-                           name='mrcnn_mask_bn2')(v, training=train_bn)
-    v = KL.Activation('relv')(v)
+    v = KL.TimeDistributed(KL.Conv2D(256, (3, 3), padding="same"),
+                           name="mrcnn_mask_v_conv2")(v)
+    v = KL.TimeDistributed(BatchNorm(),
+                           name='mrcnn_mask_v_bn2')(v, training=train_bn)
+    v = KL.Activation('relu')(v)
 
-    v = KL.TimeDistribvted(KL.Conv2D(256, (3, 3), padding="same"),
-                           name="mrcnn_mask_conv3")(v)
-    v = KL.TimeDistribvted(BatchNorm(),
-                           name='mrcnn_mask_bn3')(v, training=train_bn)
-    v = KL.Activation('relv')(v)
+    v = KL.TimeDistributed(KL.Conv2D(256, (3, 3), padding="same"),
+                           name="mrcnn_mask_v_conv3")(v)
+    v = KL.TimeDistributed(BatchNorm(),
+                           name='mrcnn_mask_v_bn3')(v, training=train_bn)
+    v = KL.Activation('relu')(v)
 
-    v = KL.TimeDistribvted(KL.Conv2D(256, (3, 3), padding="same"),
-                           name="mrcnn_mask_conv4")(v)
-    v = KL.TimeDistribvted(BatchNorm(),
-                           name='mrcnn_mask_bn4')(v, training=train_bn)
-    v = KL.Activation('relv')(v)
+    v = KL.TimeDistributed(KL.Conv2D(256, (3, 3), padding="same"),
+                           name="mrcnn_mask_v_conv4")(v)
+    v = KL.TimeDistributed(BatchNorm(),
+                           name='mrcnn_mask_v_bn4')(v, training=train_bn)
+    v = KL.Activation('relu')(v)
 
-    v = KL.TimeDistribvted(KL.Conv2DTranspose(256, (2, 2), strides=2, activation="relv"),
-                           name="mrcnn_mask_deconv")(v)
-    v = KL.TimeDistribvted(KL.Conv2D(num_classes, (1, 1), strides=1, activation="sigmoid"),
-                           name="mrcnn_mask")(v)
+    v = KL.TimeDistributed(KL.Conv2DTranspose(256, (2, 2), strides=2, activation="relu"),
+                           name="mrcnn_mask_v_deconv")(v)
+    v = KL.TimeDistributed(KL.Conv2D(num_classes, (1, 1), strides=1, activation="sigmoid"),
+                           name="mrcnn_mask_v")(v)
 
 
     # Conv layers for U
@@ -2236,7 +2237,7 @@ class MaskRCNN():
         self.keras_model._per_input_losses = {}
         loss_names = [
             "rpn_class_loss",  "rpn_bbox_loss",
-            "mrcnn_class_loss", "mrcnn_bbox_loss", "mrcnn_mask_loss"]
+            "mrcnn_class_loss", "mrcnn_bbox_loss", "mrcnn_mask_u_loss", "mrcnn_mask_v_loss", "mrcnn_mask_i_loss"]
         for name in loss_names:
             layer = self.keras_model.get_layer(name)
             if layer.output in self.keras_model.losses:
