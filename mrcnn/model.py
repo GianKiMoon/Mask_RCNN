@@ -973,75 +973,6 @@ def build_fpn_mask_graph(rois, feature_maps, image_meta,
     x = PyramidROIAlign([pool_size, pool_size],
                         name="roi_align_mask")([rois, image_meta] + feature_maps)
 
-    # TODO: make it happen
-    u = x
-    v = x
-
-    # Need to create 3 paths
-    # Conv layers for U
-
-    u = KL.TimeDistributed(KL.Conv2D(256, (3, 3), padding="same"),
-                           name="mrcnn_mask_u_conv1")(u)
-    u = KL.TimeDistributed(BatchNorm(),
-                           name='mrcnn_mask_u_bn1')(u, training=train_bn)
-    u = KL.Activation('relu')(u)
-
-    u = KL.TimeDistributed(KL.Conv2D(256, (3, 3), padding="same"),
-                           name="mrcnn_mask_u_conv2")(u)
-    u = KL.TimeDistributed(BatchNorm(),
-                           name='mrcnn_mask_u_bn2')(u, training=train_bn)
-    u = KL.Activation('relu')(u)
-
-    u = KL.TimeDistributed(KL.Conv2D(256, (3, 3), padding="same"),
-                           name="mrcnn_mask_u_conv3")(u)
-    u = KL.TimeDistributed(BatchNorm(),
-                           name='mrcnn_mask_u_bn3')(u, training=train_bn)
-    u = KL.Activation('relu')(u)
-
-    u = KL.TimeDistributed(KL.Conv2D(256, (3, 3), padding="same"),
-                           name="mrcnn_mask_u_conv4")(u)
-    u = KL.TimeDistributed(BatchNorm(),
-                           name='mrcnn_mask_u_bn4')(u, training=train_bn)
-    u = KL.Activation('relu')(u)
-
-    u = KL.TimeDistributed(KL.Conv2DTranspose(256, (2, 2), strides=2, activation="relu"),
-                           name="mrcnn_mask_u_deconv")(u)
-    u = KL.TimeDistributed(KL.Conv2D(num_classes, (1, 1), strides=1, activation="sigmoid"),
-                           name="mrcnn_mask_u")(u)
-
-    # Conv layers for V
-
-    v = KL.TimeDistributed(KL.Conv2D(256, (3, 3), padding="same"),
-                           name="mrcnn_mask_v_conv1")(v)
-    v = KL.TimeDistributed(BatchNorm(),
-                           name='mrcnn_mask_v_bn1')(v, training=train_bn)
-    v = KL.Activation('relu')(v)
-
-    v = KL.TimeDistributed(KL.Conv2D(256, (3, 3), padding="same"),
-                           name="mrcnn_mask_v_conv2")(v)
-    v = KL.TimeDistributed(BatchNorm(),
-                           name='mrcnn_mask_v_bn2')(v, training=train_bn)
-    v = KL.Activation('relu')(v)
-
-    v = KL.TimeDistributed(KL.Conv2D(256, (3, 3), padding="same"),
-                           name="mrcnn_mask_v_conv3")(v)
-    v = KL.TimeDistributed(BatchNorm(),
-                           name='mrcnn_mask_v_bn3')(v, training=train_bn)
-    v = KL.Activation('relu')(v)
-
-    v = KL.TimeDistributed(KL.Conv2D(256, (3, 3), padding="same"),
-                           name="mrcnn_mask_v_conv4")(v)
-    v = KL.TimeDistributed(BatchNorm(),
-                           name='mrcnn_mask_v_bn4')(v, training=train_bn)
-    v = KL.Activation('relu')(v)
-
-    v = KL.TimeDistributed(KL.Conv2DTranspose(256, (2, 2), strides=2, activation="relu"),
-                           name="mrcnn_mask_v_deconv")(v)
-    v = KL.TimeDistributed(KL.Conv2D(num_classes, (1, 1), strides=1, activation="sigmoid"),
-                           name="mrcnn_mask_v")(v)
-
-
-    # Conv layers for U
     x = KL.TimeDistributed(KL.Conv2D(256, (3, 3), padding="same"),
                            name="mrcnn_mask_conv1")(x)
     x = KL.TimeDistributed(BatchNorm(),
@@ -1070,7 +1001,142 @@ def build_fpn_mask_graph(rois, feature_maps, image_meta,
                            name="mrcnn_mask_deconv")(x)
     x = KL.TimeDistributed(KL.Conv2D(num_classes, (1, 1), strides=1, activation="sigmoid"),
                            name="mrcnn_mask")(x)
-    return u, v, x
+    return x
+
+
+def build_fpn_uv_graph(rois, feature_maps, image_meta,
+                         pool_size, num_classes, train_bn=True):
+    """Builds the computation graph of the mask head of Feature Pyramid Network.
+
+    rois: [batch, num_rois, (y1, x1, y2, x2)] Proposal boxes in normalized
+          coordinates.
+    feature_maps: List of feature maps from different layers of the pyramid,
+                  [P2, P3, P4, P5]. Each has a different resolution.
+    image_meta: [batch, (meta data)] Image details. See compose_image_meta()
+    pool_size: The width of the square feature map generated from ROI Pooling.
+    num_classes: number of classes, which determines the depth of the results
+    train_bn: Boolean. Train or freeze Batch Norm layers
+
+    Returns: Masks [batch, num_rois, MASK_POOL_SIZE, MASK_POOL_SIZE, NUM_CLASSES]
+    """
+    # ROI Pooling
+    # Shape: [batch, num_rois, MASK_POOL_SIZE, MASK_POOL_SIZE, channels]
+    x = PyramidROIAlign([pool_size, pool_size],
+                        name="roi_align_mask")([rois, image_meta] + feature_maps)
+
+    #  Branch for quantized u classification
+    q_u = KL.TimeDistributed(KL.Conv2D(512, (3, 3), padding="same"),
+                           name="mrcnn_q_u_conv1")(x)
+    q_u = KL.TimeDistributed(BatchNorm(),
+                           name='mrcnn_q_u_bn1')(q_u, training=train_bn)
+    q_u = KL.Activation('relu')(q_u)
+
+    q_u = KL.TimeDistributed(KL.Conv2D(512, (3, 3), padding="same"),
+                           name="mrcnn_q_u_conv2")(q_u)
+    q_u = KL.TimeDistributed(BatchNorm(),
+                           name='mrcnn_q_u_bn2')(q_u, training=train_bn)
+    q_u = KL.Activation('relu')(q_u)
+
+    q_u = KL.TimeDistributed(KL.Conv2D(512, (3, 3), padding="same"),
+                           name="mrcnn_q_u_conv3")(q_u)
+    q_u = KL.TimeDistributed(BatchNorm(),
+                           name='mrcnn_q_u_bn3')(q_u, training=train_bn)
+    q_u = KL.Activation('relu')(q_u)
+
+    q_u = KL.TimeDistributed(KL.Conv2D(512, (3, 3), padding="same"),
+                           name="mrcnn_q_u_conv4")(q_u)
+    q_u = KL.TimeDistributed(BatchNorm(),
+                           name='mrcnn_q_u_bn4')(q_u, training=train_bn)
+    q_u = KL.Activation('relu')(q_u)
+
+    #  1 x 1 Convolution, number of channels respond to k quantized areas of u
+    q_u = KL.TimeDistributed(KL.Conv2D(10, (1, 1), padding="same"), name='mrcnn_q_u_1x1')(q_u)
+
+    #  Branch for quantized v classification
+    q_v = KL.TimeDistributed(KL.Conv2D(512, (3, 3), padding="same"),
+                             name="mrcnn_q_v_conv1")(x)
+    q_v = KL.TimeDistributed(BatchNorm(),
+                             name='mrcnn_q_v_bn1')(q_v, training=train_bn)
+    q_v = KL.Activation('relu')(q_v)
+
+    q_v = KL.TimeDistributed(KL.Conv2D(512, (3, 3), padding="same"),
+                             name="mrcnn_q_v_conv2")(q_v)
+    q_v = KL.TimeDistributed(BatchNorm(),
+                             name='mrcnn_q_v_bn2')(q_v, training=train_bn)
+    q_v = KL.Activation('relu')(q_v)
+
+    q_v = KL.TimeDistributed(KL.Conv2D(512, (3, 3), padding="same"),
+                             name="mrcnn_q_v_conv3")(q_v)
+    q_v = KL.TimeDistributed(BatchNorm(),
+                             name='mrcnn_q_v_bn3')(q_v, training=train_bn)
+    q_v = KL.Activation('relu')(q_v)
+
+    q_v = KL.TimeDistributed(KL.Conv2D(512, (3, 3), padding="same"),
+                             name="mrcnn_q_v_conv4")(q_v)
+    q_v = KL.TimeDistributed(BatchNorm(),
+                             name='mrcnn_q_v_bn4')(q_v, training=train_bn)
+    q_v = KL.Activation('relu')(q_v)
+
+    #  1 x 1 Convolution, number of channels respond to k quantized areas of u
+    q_v = KL.TimeDistributed(KL.Conv2D(10, (1, 1), padding="same"), name='mrcnn_q_v_1x1')(q_v)
+
+    # Branch for real u regression
+    r_u = KL.TimeDistributed(KL.Conv2D(512, (3, 3), padding="same"),
+                             name="mrcnn_r_u_conv1")(x)
+    r_u = KL.TimeDistributed(BatchNorm(),
+                             name='mrcnn_r_u_bn1')(r_u, training=train_bn)
+    r_u = KL.Activation('relu')(r_u)
+
+    r_u = KL.TimeDistributed(KL.Conv2D(512, (3, 3), padding="same"),
+                             name="mrcnn_r_u_conv2")(r_u)
+    r_u = KL.TimeDistributed(BatchNorm(),
+                             name='mrcnn_r_u_bn2')(r_u, training=train_bn)
+    r_u = KL.Activation('relu')(r_u)
+
+    r_u = KL.TimeDistributed(KL.Conv2D(512, (3, 3), padding="same"),
+                             name="mrcnn_r_u_conv3")(r_u)
+    r_u = KL.TimeDistributed(BatchNorm(),
+                             name='mrcnn_r_u_bn3')(r_u, training=train_bn)
+    r_u = KL.Activation('relu')(r_u)
+
+    r_u = KL.TimeDistributed(KL.Conv2D(512, (3, 3), padding="same"),
+                             name="mrcnn_r_u_conv4")(r_u)
+    r_u = KL.TimeDistributed(BatchNorm(),
+                             name='mrcnn_r_u_bn4')(r_u, training=train_bn)
+    r_u = KL.Activation('relu')(r_u)
+
+    # Regression layer
+    r_u = KL.TimeDistributed(KL.Dense(10, activation='sigmoid'))(r_u)
+
+    # Branch for real v regression
+    r_v = KL.TimeDistributed(KL.Conv2D(512, (3, 3), padding="same"),
+                             name="mrcnn_r_v_conv1")(x)
+    r_v = KL.TimeDistributed(BatchNorm(),
+                             name='mrcnn_r_v_bn1')(r_v, training=train_bn)
+    r_v = KL.Activation('relu')(r_v)
+
+    r_v = KL.TimeDistributed(KL.Conv2D(512, (3, 3), padding="same"),
+                             name="mrcnn_r_v_conv2")(r_v)
+    r_v = KL.TimeDistributed(BatchNorm(),
+                             name='mrcnn_r_v_bn2')(r_v, training=train_bn)
+    r_v = KL.Activation('relu')(r_v)
+
+    r_v = KL.TimeDistributed(KL.Conv2D(512, (3, 3), padding="same"),
+                             name="mrcnn_r_v_conv3")(r_v)
+    r_v = KL.TimeDistributed(BatchNorm(),
+                             name='mrcnn_r_v_bn3')(r_v, training=train_bn)
+    r_v = KL.Activation('relu')(r_v)
+
+    r_v = KL.TimeDistributed(KL.Conv2D(512, (3, 3), padding="same"),
+                             name="mrcnn_r_v_conv4")(r_v)
+    r_v = KL.TimeDistributed(BatchNorm(),
+                             name='mrcnn_r_v_bn4')(r_v, training=train_bn)
+    r_v = KL.Activation('relu')(r_v)
+
+    # Regression layer
+    r_v = KL.TimeDistributed(KL.Dense(10, activation='sigmoid'))(r_v)
+
+    return q_u, q_v, r_u, r_v
 
 
 ############################################################
@@ -1247,6 +1313,36 @@ def mrcnn_mask_loss_graph(target_masks, target_class_ids, pred_masks):
     return loss
 
 
+def mrcnn_q_u_loss(predicted_q_u, target_q_u):
+    """Softmax cross entropy quantized u loss """
+
+    sm = KL.Activation("softmax",
+                       name="rpn_class_xxx")(predicted_q_u)
+    loss = K.categorical_crossentropy(target=target_q_u, output=sm)
+    loss = K.mean(loss)
+    return loss
+
+
+def mrcnn_q_v_loss(predicted_q_v, target_q_v):
+    """Softmax cross entropy quantized v loss """
+    sm = KL.Activation("softmax",
+                       name="rpn_class_xxx")(predicted_q_v)
+    loss = K.categorical_crossentropy(target=target_q_v, output=sm)
+    loss = K.mean(loss)
+    return loss
+
+
+def mrcnn_r_u_loss(predicted_r_u, target_r_u):
+    """L1 regression u loss """
+    loss = smooth_l1_loss(target_r_u, predicted_r_u)
+    return loss
+
+
+def mrcnn_r_v_loss(predicted_r_v, target_r_v):
+    """L1 regression v loss """
+    loss = smooth_l1_loss(target_r_v, predicted_r_v)
+    return loss
+
 ############################################################
 #  Data Generator
 ############################################################
@@ -1278,6 +1374,7 @@ def load_image_gt(dataset, config, image_id, augment=False, augmentation=None,
     # Load image and mask
     image = dataset.load_image(image_id)
     mask, class_ids = dataset.load_mask(image_id)
+    uv = dataset.load_uv(image_id) # TODO: update with UV mask
     original_shape = image.shape
     image, window, scale, padding, crop = utils.resize_image(
         image,
@@ -1286,14 +1383,15 @@ def load_image_gt(dataset, config, image_id, augment=False, augmentation=None,
         max_dim=config.IMAGE_MAX_DIM,
         mode=config.IMAGE_RESIZE_MODE)
     mask = utils.resize_mask(mask, scale, padding, crop)
+    # TODO: Resize uv?
 
     # Random horizontal flips.
     # TODO: will be removed in a future update in favor of augmentation
     if augment:
         logging.warning("'augment' is deprecated. Use 'augmentation' instead.")
-        if random.randint(0, 1):
-            image = np.fliplr(image)
-            mask = np.fliplr(mask)
+        # if random.randint(0, 1):
+        #    image = np.fliplr(image)
+        #    mask = np.fliplr(mask)
 
     # Augmentation
     # This requires the imgaug lib (https://github.com/aleju/imgaug)
@@ -1351,7 +1449,7 @@ def load_image_gt(dataset, config, image_id, augment=False, augmentation=None,
     image_meta = compose_image_meta(image_id, original_shape, image.shape,
                                     window, scale, active_class_ids)
 
-    return image, image_meta, class_ids, bbox, mask
+    return image, image_meta, class_ids, bbox, mask, uv
 
 
 def build_detection_targets(rpn_rois, gt_class_ids, gt_boxes, gt_masks, config):
@@ -1764,17 +1862,18 @@ def data_generator(dataset, config, shuffle=True, augment=False, augmentation=No
             # Get GT bounding boxes and masks for image.
             image_id = image_ids[image_index]
 
+            # TODO: reenable augmentation
             # If the image source is not to be augmented pass None as augmentation
-            if dataset.image_info[image_id]['source'] in no_augmentation_sources:
-                image, image_meta, gt_class_ids, gt_boxes, gt_masks = \
+            #if dataset.image_info[image_id]['source'] in no_augmentation_sources:
+            #    image, image_meta, gt_class_ids, gt_boxes, gt_masks, gt_uv = \
+            #    load_image_gt(dataset, config, image_id, augment=augment,
+            #                  augmentation=None,
+            #                  use_mini_mask=config.USE_MINI_MASK)
+            #else:
+            image, image_meta, gt_class_ids, gt_boxes, gt_masks, gt_uv = \
                 load_image_gt(dataset, config, image_id, augment=augment,
-                              augmentation=None,
-                              use_mini_mask=config.USE_MINI_MASK)
-            else:
-                image, image_meta, gt_class_ids, gt_boxes, gt_masks = \
-                    load_image_gt(dataset, config, image_id, augment=augment,
-                                augmentation=augmentation,
-                                use_mini_mask=config.USE_MINI_MASK)
+                augmentation=augmentation,
+                use_mini_mask=config.USE_MINI_MASK)
 
             # Skip images that have no instances. This can happen in cases
             # where we train on a subset of classes and the image doesn't
@@ -1953,6 +2052,8 @@ class MaskRCNN():
                 input_gt_masks = KL.Input(
                     shape=[config.IMAGE_SHAPE[0], config.IMAGE_SHAPE[1], None],
                     name="input_gt_masks", dtype=bool)
+            # 4. GT uv
+            # input_gt_uv = KL.Input(shape=[]) # TODO: Update with shapes
         elif mode == "inference":
             # Anchors in normalized coordinates
             input_anchors = KL.Input(shape=[None, 4], name="input_anchors")
@@ -2065,7 +2166,13 @@ class MaskRCNN():
                                      train_bn=config.TRAIN_BN,
                                      fc_layers_size=config.FPN_CLASSIF_FC_LAYERS_SIZE)
 
-            mrcnn_mask_u, mrcnn_mask_v, mrcnn_mask_i = build_fpn_mask_graph(rois, mrcnn_feature_maps,
+            mrcnn_mask = build_fpn_mask_graph(rois, mrcnn_feature_maps,
+                                              input_image_meta,
+                                              config.MASK_POOL_SIZE,
+                                              config.NUM_CLASSES,
+                                              train_bn=config.TRAIN_BN)
+
+            q_u, q_v, r_u, r_v = build_fpn_uv_graph(rois, mrcnn_feature_maps,
                                               input_image_meta,
                                               config.MASK_POOL_SIZE,
                                               config.NUM_CLASSES,
@@ -2083,12 +2190,10 @@ class MaskRCNN():
                 [target_class_ids, mrcnn_class_logits, active_class_ids])
             bbox_loss = KL.Lambda(lambda x: mrcnn_bbox_loss_graph(*x), name="mrcnn_bbox_loss")(
                 [target_bbox, target_class_ids, mrcnn_bbox])
-            mask_loss_u = KL.Lambda(lambda x: mrcnn_mask_loss_graph(*x), name="mrcnn_mask_u_loss")(
-                [target_mask, target_class_ids, mrcnn_mask_u])
-            mask_loss_v = KL.Lambda(lambda x: mrcnn_mask_loss_graph(*x), name="mrcnn_mask_v_loss")(
-                [target_mask, target_class_ids, mrcnn_mask_v])
-            mask_loss_i = KL.Lambda(lambda x: mrcnn_mask_loss_graph(*x), name="mrcnn_mask_i_loss")(
-                [target_mask, target_class_ids, mrcnn_mask_i])
+            mask_loss = KL.Lambda(lambda x: mrcnn_mask_loss_graph(*x), name="mrcnn_mask_loss")(
+                [target_mask, target_class_ids, mrcnn_mask])
+            # q_u_loss = KL.lambda(lambda x: mrcnn_q_u_loss(*x), name="mrcnn_q_u_loss")([q_u])
+            # TODO: uv losses
 
             # Model
             inputs = [input_image, input_image_meta,
@@ -2096,9 +2201,9 @@ class MaskRCNN():
             if not config.USE_RPN_ROIS:
                 inputs.append(input_rois)
             outputs = [rpn_class_logits, rpn_class, rpn_bbox,
-                       mrcnn_class_logits, mrcnn_class, mrcnn_bbox, mrcnn_mask_u, mrcnn_mask_v, mrcnn_mask_i,
+                       mrcnn_class_logits, mrcnn_class, mrcnn_bbox, mrcnn_mask,
                        rpn_rois, output_rois,
-                       rpn_class_loss, rpn_bbox_loss, class_loss, bbox_loss, mask_loss_u, mask_loss_v, mask_loss_i]
+                       rpn_class_loss, rpn_bbox_loss, class_loss, bbox_loss, mask_loss]
             model = KM.Model(inputs, outputs, name='mask_rcnn')
         else:
             # Network Heads
@@ -2117,7 +2222,7 @@ class MaskRCNN():
 
             # Create masks for detections
             detection_boxes = KL.Lambda(lambda x: x[..., :4])(detections)
-            mrcnn_mask_u, mrcnn_mask_v, mrcnn_mask_i = build_fpn_mask_graph(detection_boxes, mrcnn_feature_maps,
+            mrcnn_mask = build_fpn_mask_graph(detection_boxes, mrcnn_feature_maps,
                                               input_image_meta,
                                               config.MASK_POOL_SIZE,
                                               config.NUM_CLASSES,
@@ -2125,7 +2230,7 @@ class MaskRCNN():
 
             model = KM.Model([input_image, input_image_meta, input_anchors],
                              [detections, mrcnn_class, mrcnn_bbox,
-                              mrcnn_mask_u, mrcnn_mask_v, mrcnn_mask_i,
+                              mrcnn_mask,
                               rpn_rois, rpn_class, rpn_bbox],
                              name='mask_rcnn')
 
@@ -2237,7 +2342,7 @@ class MaskRCNN():
         self.keras_model._per_input_losses = {}
         loss_names = [
             "rpn_class_loss",  "rpn_bbox_loss",
-            "mrcnn_class_loss", "mrcnn_bbox_loss", "mrcnn_mask_u_loss", "mrcnn_mask_v_loss", "mrcnn_mask_i_loss"]
+            "mrcnn_class_loss", "mrcnn_bbox_loss", "mrcnn_mask_loss"]
         for name in loss_names:
             layer = self.keras_model.get_layer(name)
             if layer.output in self.keras_model.losses:

@@ -76,7 +76,7 @@ class DenseposeConfig(Config):
     IMAGES_PER_GPU = 1
 
     # Number of classes (including background)
-    NUM_CLASSES = 1 + 80  # Background + human
+    NUM_CLASSES = 1 + 1   # Background + human
 
     # Number of training steps per epoch
     STEPS_PER_EPOCH = 100
@@ -105,27 +105,15 @@ class DenseposeDataset(utils.Dataset):
         """
 
         coco = COCO("{}/annotations/densepose_coco_2014_{}.json".format(dataset_dir, subset))
+        if subset == "minival" or subset == "valminusminival":
+            subset = "val"
         image_dir = "{}/{}2014".format(dataset_dir, subset)
 
-        # Load all classes or a subset?
-        if not class_ids:
-            # All classes
-            class_ids = sorted(coco.getCatIds())
+        # All images
+        image_ids = list(coco.imgs.keys())
 
-        # All images or a subset?
-        if class_ids:
-            image_ids = []
-            for id in class_ids:
-                image_ids.extend(list(coco.getImgIds(catIds=[id])))
-            # Remove duplicates
-            image_ids = list(set(image_ids))
-        else:
-            # All images
-            image_ids = list(coco.imgs.keys())
-
-        # Add classes
-        for i in class_ids:
-            self.add_class("coco", i, coco.loadCats(i)[0]["name"])
+        # Add one additional class for persons
+        self.add_class("coco", 1, "person")
 
         # Add images
         for i in image_ids:
@@ -135,10 +123,162 @@ class DenseposeDataset(utils.Dataset):
                 width=coco.imgs[i]["width"],
                 height=coco.imgs[i]["height"],
                 annotations=coco.loadAnns(coco.getAnnIds(
-                    imgIds=[i], catIds=class_ids, iscrowd=None)))
+                    imgIds=[i], iscrowd=None)))
         if return_coco:
             return coco
 
+    def load_mask(self, image_id):
+        """Load instance masks for the given image.
+
+        Different datasets use different ways to store masks. This
+        function converts the different mask format to one format
+        in the form of a bitmap [height, width, instances].
+
+        Returns:
+        masks: A bool array of shape [height, width, instance count] with
+            one mask per instance.
+        class_ids: a 1D array of class IDs of the instance masks.
+        """
+        # If not a COCO image, delegate to parent class.
+        image_info = self.image_info[image_id]
+        if image_info["source"] != "coco":
+            return super(DenseposeDataset, self).load_mask(image_id)
+
+        instance_masks = []
+        class_ids = []
+        annotations = self.image_info[image_id]["annotations"]
+        # Build mask of shape [height, width, instance_count] and list
+        # of class IDs that correspond to each channel of the mask.
+        for annotation in annotations:
+            class_id = self.map_source_class_id(
+                "coco.{}".format(annotation['category_id']))
+            if class_id:
+                m = self.annToMask(annotation, image_info["height"],
+                                   image_info["width"])
+                # Some objects are so small that they're less than 1 pixel area
+                # and end up rounded out. Skip those objects.
+                if m.max() < 1:
+                    continue
+                # Is it a crowd? If so, use a negative class ID.
+                if annotation['iscrowd']:
+                    # Use negative class ID for crowds
+                    class_id *= -1
+                    # For crowd masks, annToMask() sometimes returns a mask
+                    # smaller than the given dimensions. If so, resize it.
+                    if m.shape[0] != image_info["height"] or m.shape[1] != image_info["width"]:
+                        m = np.ones([image_info["height"], image_info["width"]], dtype=bool)
+                instance_masks.append(m)
+                class_ids.append(class_id)
+
+        # Pack instance masks into an array
+        if class_ids:
+            mask = np.stack(instance_masks, axis=2).astype(np.bool)
+            class_ids = np.array(class_ids, dtype=np.int32)
+            return mask, class_ids
+        else:
+            # Call super class to return an empty mask
+            return super(DenseposeDataset, self).load_mask(image_id)
+
+    def load_uv(self, image_id):
+        # If not a COCO image, delegate to parent class.
+        image_info = self.image_info[image_id]
+        if image_info["source"] != "coco":
+            return super(DenseposeDataset, self).load_mask(image_id)
+
+        instance_uvs = []
+        class_ids = []
+        annotations = self.image_info[image_id]["annotations"]
+        # Build mask of shape [height, width, instance_count] and list
+        # of class IDs that correspond to each channel of the mask.
+        for annotation in annotations:
+            class_id = self.map_source_class_id(
+                "coco.{}".format(annotation['category_id']))
+            if class_id:
+                uv = self.annToUV(annotation, image_info["height"],
+                                   image_info["width"])
+
+                instance_uvs.append(uv)
+                class_ids.append(class_id)
+
+        # Pack instance masks into an array
+        if class_ids:
+            uvs = np.stack(instance_uvs, axis=2)
+            class_ids = np.array(class_ids, dtype=np.int32)
+            return uvs
+        else:
+            # Call super class to return an empty mask
+            return super(DenseposeDataset, self).load_mask(image_id)
+
+    def image_reference(self, image_id):
+        """Return a link to the image in the COCO Website."""
+        info = self.image_info[image_id]
+        if info["source"] == "coco":
+            return "http://cocodataset.org/#explore?id={}".format(info["id"])
+        else:
+            super(DenseposeDataset, self).image_reference(image_id)
+
+    # The following two functions are from pycocotools with a few changes.
+
+    def annToRLE(self, ann, height, width):
+        """
+        Convert annotation which can be polygons, uncompressed RLE to RLE.
+        :return: binary mask (numpy 2D array)
+        """
+        segm = ann['segmentation']
+        if isinstance(segm, list):
+            # polygon -- a single object might consist of multiple parts
+            # we merge all parts into one mask rle code
+            rles = maskUtils.frPyObjects(segm, height, width)
+            rle = maskUtils.merge(rles)
+        elif isinstance(segm['counts'], list):
+            # uncompressed RLE
+            rle = maskUtils.frPyObjects(segm, height, width)
+        else:
+            # rle
+            rle = ann['segmentation']
+        return rle
+
+    def annToRLEForUV(self, ann, height, width):
+        dp_masks = ann['dp_masks']
+
+        if isinstance(dp_masks['counts'], list):
+            # uncompressed RLE
+            dp_masks = maskUtils.frPyObjects(dp_masks, height, width)
+        elif isinstance(dp_masks, list):
+            # polygon -- a single object might consist of multiple parts
+            # we merge all parts into one mask rle code
+            rles = maskUtils.frPyObjects(dp_masks, height, width)
+            dp_masks = maskUtils.merge(rles)
+
+
+        return dp_masks
+
+    def annToUV(self, ann, height, width):
+
+        
+        # rle = self.annToRLEForUV(ann, height, width)
+        # dp_masks = maskUtils.decode(rle)
+        dp_I = np.array(ann['dp_I'])
+        dp_U = np.array(ann['dp_U'])
+        dp_V = np.array(ann['dp_V'])
+        dp_x = np.array(ann['dp_x'])
+        dp_y = np.array(ann['dp_y'])
+
+        dp = np.stack([dp_x, dp_y, dp_I, dp_U, dp_V], axis=0)
+        rest = 336 - dp.shape[1]
+        dp = np.concatenate((dp, np.zeros([5, rest])), axis=1)
+
+        return dp
+
+
+    def annToMask(self, ann, height, width):
+        """
+        Convert annotation which can be polygons, uncompressed RLE, or RLE to binary mask.
+        :return: binary mask (numpy 2D array)
+        """
+        rle = self.annToRLE(ann, height, width)
+        m = maskUtils.decode(rle)
+        return m
 
 
 def train(model):
@@ -219,8 +359,7 @@ def train(model):
 ############################################################
 #  Training
 ############################################################
-
-if __name__ == '__main__':
+def main(_args):
     import argparse
 
     # Parse command line arguments
@@ -245,14 +384,17 @@ if __name__ == '__main__':
     parser.add_argument('--video', required=False,
                         metavar="path or URL to video",
                         help='Video to apply the color splash effect on')
-    args = parser.parse_args()
+    global args
+    global config
+    args = parser.parse_args(_args)
+
 
     # Validate arguments
     if args.command == "train":
         assert args.dataset, "Argument --dataset is required for training"
     elif args.command == "test":
-        assert args.image or args.video,\
-               "Provide --image or --video to apply color splash"
+        assert args.image or args.video, \
+            "Provide --image or --video to apply color splash"
 
     print("Weights: ", args.weights)
     print("Dataset: ", args.dataset)
@@ -267,6 +409,7 @@ if __name__ == '__main__':
             # one image at a time. Batch size = GPU_COUNT * IMAGES_PER_GPU
             GPU_COUNT = 1
             IMAGES_PER_GPU = 1
+
         config = InferenceConfig()
     config.display()
 
@@ -308,7 +451,11 @@ if __name__ == '__main__':
     if args.command == "train":
         train(model)
     # elif args.command == "test":
-        # TODO: Test model
+    # TODO: Test model
     else:
         print("'{}' is not recognized. "
               "Use 'train' or 'splash'".format(args.command))
+
+
+if __name__ == '__main__':
+    main(sys.argv[1:])
