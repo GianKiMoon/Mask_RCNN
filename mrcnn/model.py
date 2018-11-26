@@ -482,7 +482,8 @@ def overlaps_graph(boxes1, boxes2):
     return overlaps
 
 
-def detection_targets_graph(proposals, gt_class_ids, gt_boxes, gt_masks, config):
+def detection_targets_graph(proposals, gt_class_ids, gt_boxes, gt_masks, gt_uvs,
+                           config): #  gt_c_i, gt_r_u, gt_r_v,
     """Generates detection targets for one image. Subsamples proposals and
     generates target class IDs, bounding box deltas, and masks for each.
 
@@ -518,6 +519,7 @@ def detection_targets_graph(proposals, gt_class_ids, gt_boxes, gt_masks, config)
                                    name="trim_gt_class_ids")
     gt_masks = tf.gather(gt_masks, tf.where(non_zeros)[:, 0], axis=2,
                          name="trim_gt_masks")
+    # No need to remove zero padding for uv
 
     # Handle COCO crowds
     # A crowd box in COCO is a bounding box around several instances. Exclude
@@ -529,6 +531,7 @@ def detection_targets_graph(proposals, gt_class_ids, gt_boxes, gt_masks, config)
     gt_class_ids = tf.gather(gt_class_ids, non_crowd_ix)
     gt_boxes = tf.gather(gt_boxes, non_crowd_ix)
     gt_masks = tf.gather(gt_masks, non_crowd_ix, axis=2)
+    gt_uvs = tf.gather(gt_uvs, non_crowd_ix, axis=2)
 
     # Compute overlaps matrix [proposals, gt_boxes]
     overlaps = overlaps_graph(proposals, gt_boxes)
@@ -580,6 +583,9 @@ def detection_targets_graph(proposals, gt_class_ids, gt_boxes, gt_masks, config)
     # Pick the right mask for each ROI
     roi_masks = tf.gather(transposed_masks, roi_gt_box_assignment)
 
+    # do I need to permute?
+    roi_uvs = tf.gather(tf.transpose(gt_uvs, [2, 0, 1]), roi_gt_box_assignment)
+
     # Compute mask targets
     boxes = positive_rois
     if config.USE_MINI_MASK:
@@ -616,7 +622,10 @@ def detection_targets_graph(proposals, gt_class_ids, gt_boxes, gt_masks, config)
     deltas = tf.pad(deltas, [(0, N + P), (0, 0)])
     masks = tf.pad(masks, [[0, N + P], (0, 0), (0, 0)])
 
-    return rois, roi_gt_class_ids, deltas, masks
+    # Some kind of padding needed?
+    uvs = tf.pad(roi_uvs, [(0, N + P), (0, 0), (0, 0)])
+
+    return rois, roi_gt_class_ids, deltas, masks, uvs
 
 
 class DetectionTargetLayer(KE.Layer):
@@ -653,14 +662,16 @@ class DetectionTargetLayer(KE.Layer):
         gt_class_ids = inputs[1]
         gt_boxes = inputs[2]
         gt_masks = inputs[3]
+        gt_uvs = inputs[4]
+
 
         # Slice the batch and run a graph for each slice
         # TODO: Rename target_bbox to target_deltas for clarity
-        names = ["rois", "target_class_ids", "target_bbox", "target_mask"]
+        names = ["rois", "target_class_ids", "target_bbox", "target_mask", "target_uv"] #, "target_c_i", "target_r_u", "target_r_v"]
         outputs = utils.batch_slice(
-            [proposals, gt_class_ids, gt_boxes, gt_masks],
-            lambda w, x, y, z: detection_targets_graph(
-                w, x, y, z, self.config),
+            [proposals, gt_class_ids, gt_boxes, gt_masks, gt_uvs],
+            lambda v, w, x, y, z: detection_targets_graph(
+                v, w, x, y, z, self.config),
             self.config.IMAGES_PER_GPU, names=names)
         return outputs
 
@@ -670,11 +681,12 @@ class DetectionTargetLayer(KE.Layer):
             (None, self.config.TRAIN_ROIS_PER_IMAGE),  # class_ids
             (None, self.config.TRAIN_ROIS_PER_IMAGE, 4),  # deltas
             (None, self.config.TRAIN_ROIS_PER_IMAGE, self.config.MASK_SHAPE[0],
-             self.config.MASK_SHAPE[1])  # masks
+             self.config.MASK_SHAPE[1]),  # masks
+            (None, self.config.TRAIN_ROIS_PER_IMAGE, 5, 196)
         ]
 
     def compute_mask(self, inputs, mask=None):
-        return [None, None, None, None]
+        return [None, None, None, None, None]
 
 
 ############################################################
@@ -1005,7 +1017,7 @@ def build_fpn_mask_graph(rois, feature_maps, image_meta,
 
 
 def build_fpn_uv_graph(rois, feature_maps, image_meta,
-                         pool_size, num_classes, train_bn=True):
+                       pool_size, num_classes, train_bn=True):
     """Builds the computation graph of the mask head of Feature Pyramid Network.
 
     rois: [batch, num_rois, (y1, x1, y2, x2)] Proposal boxes in normalized
@@ -1022,121 +1034,41 @@ def build_fpn_uv_graph(rois, feature_maps, image_meta,
     # ROI Pooling
     # Shape: [batch, num_rois, MASK_POOL_SIZE, MASK_POOL_SIZE, channels]
     x = PyramidROIAlign([pool_size, pool_size],
-                        name="roi_align_mask")([rois, image_meta] + feature_maps)
+                        name="roi_align_uv")([rois, image_meta] + feature_maps)
 
-    #  Branch for quantized u classification
-    q_u = KL.TimeDistributed(KL.Conv2D(512, (3, 3), padding="same"),
-                           name="mrcnn_q_u_conv1")(x)
-    q_u = KL.TimeDistributed(BatchNorm(),
-                           name='mrcnn_q_u_bn1')(q_u, training=train_bn)
-    q_u = KL.Activation('relu')(q_u)
+    fcn = x
 
-    q_u = KL.TimeDistributed(KL.Conv2D(512, (3, 3), padding="same"),
-                           name="mrcnn_q_u_conv2")(q_u)
-    q_u = KL.TimeDistributed(BatchNorm(),
-                           name='mrcnn_q_u_bn2')(q_u, training=train_bn)
-    q_u = KL.Activation('relu')(q_u)
+    for i in range(8):
+        fcn = KL.TimeDistributed(KL.Conv2D(256, (3, 3), strides=(1, 1), padding="same"),
+                                 name="mrcnn_q_u_conv{}".format(i))(fcn)
+        fcn = KL.TimeDistributed(BatchNorm(),
+                                 name='mrcnn_q_u_bn{}'.format(i))(fcn, training=train_bn)
+        fcn = KL.Activation('relu')(fcn)
 
-    q_u = KL.TimeDistributed(KL.Conv2D(512, (3, 3), padding="same"),
-                           name="mrcnn_q_u_conv3")(q_u)
-    q_u = KL.TimeDistributed(BatchNorm(),
-                           name='mrcnn_q_u_bn3')(q_u, training=train_bn)
-    q_u = KL.Activation('relu')(q_u)
-
-    q_u = KL.TimeDistributed(KL.Conv2D(512, (3, 3), padding="same"),
-                           name="mrcnn_q_u_conv4")(q_u)
-    q_u = KL.TimeDistributed(BatchNorm(),
-                           name='mrcnn_q_u_bn4')(q_u, training=train_bn)
-    q_u = KL.Activation('relu')(q_u)
+    # Part index classification
+    c_i = KL.TimeDistributed(KL.Conv2DTranspose(256, (4, 4), strides=4, activation="relu"),
+                           name="mrcnn_c_i_deconv")(fcn)
 
     #  1 x 1 Convolution, number of channels respond to k quantized areas of u
-    q_u = KL.TimeDistributed(KL.Conv2D(10, (1, 1), padding="same"), name='mrcnn_q_u_1x1')(q_u)
+    c_i = KL.TimeDistributed(KL.Conv2D(25, (1, 1), strides=1, activation="sigmoid"), name='mrcnn_c_i_1x1')(c_i)
 
-    #  Branch for quantized v classification
-    q_v = KL.TimeDistributed(KL.Conv2D(512, (3, 3), padding="same"),
-                             name="mrcnn_q_v_conv1")(x)
-    q_v = KL.TimeDistributed(BatchNorm(),
-                             name='mrcnn_q_v_bn1')(q_v, training=train_bn)
-    q_v = KL.Activation('relu')(q_v)
+    # c_i = KL.TimeDistributed(keras.layers.UpSampling2D(size=(2, 2), data_format=None), name="mrcnn_c_i_upsampling")(c_i)
 
-    q_v = KL.TimeDistributed(KL.Conv2D(512, (3, 3), padding="same"),
-                             name="mrcnn_q_v_conv2")(q_v)
-    q_v = KL.TimeDistributed(BatchNorm(),
-                             name='mrcnn_q_v_bn2')(q_v, training=train_bn)
-    q_v = KL.Activation('relu')(q_v)
-
-    q_v = KL.TimeDistributed(KL.Conv2D(512, (3, 3), padding="same"),
-                             name="mrcnn_q_v_conv3")(q_v)
-    q_v = KL.TimeDistributed(BatchNorm(),
-                             name='mrcnn_q_v_bn3')(q_v, training=train_bn)
-    q_v = KL.Activation('relu')(q_v)
-
-    q_v = KL.TimeDistributed(KL.Conv2D(512, (3, 3), padding="same"),
-                             name="mrcnn_q_v_conv4")(q_v)
-    q_v = KL.TimeDistributed(BatchNorm(),
-                             name='mrcnn_q_v_bn4')(q_v, training=train_bn)
-    q_v = KL.Activation('relu')(q_v)
+    # U regression
+    r_u = KL.TimeDistributed(KL.Conv2DTranspose(256, (4, 4), strides=4, activation="relu"),
+                           name="mrcnn_r_u_deconv")(fcn)
 
     #  1 x 1 Convolution, number of channels respond to k quantized areas of u
-    q_v = KL.TimeDistributed(KL.Conv2D(10, (1, 1), padding="same"), name='mrcnn_q_v_1x1')(q_v)
+    r_u = KL.TimeDistributed(KL.Conv2D(1, (1, 1), strides=1, activation="sigmoid"), name='mrcnn_r_u_1x1')(r_u)
 
-    # Branch for real u regression
-    r_u = KL.TimeDistributed(KL.Conv2D(512, (3, 3), padding="same"),
-                             name="mrcnn_r_u_conv1")(x)
-    r_u = KL.TimeDistributed(BatchNorm(),
-                             name='mrcnn_r_u_bn1')(r_u, training=train_bn)
-    r_u = KL.Activation('relu')(r_u)
+    # U regression
+    r_v = KL.TimeDistributed(KL.Conv2DTranspose(256, (4, 4), strides=4, activation="relu"),
+                             name="mrcnn_r_v_deconv")(fcn)
 
-    r_u = KL.TimeDistributed(KL.Conv2D(512, (3, 3), padding="same"),
-                             name="mrcnn_r_u_conv2")(r_u)
-    r_u = KL.TimeDistributed(BatchNorm(),
-                             name='mrcnn_r_u_bn2')(r_u, training=train_bn)
-    r_u = KL.Activation('relu')(r_u)
+    #  1 x 1 Convolution, number of channels respond to k quantized areas of u
+    r_v = KL.TimeDistributed(KL.Conv2D(1, (1, 1), strides=1, activation="sigmoid"), name='mrcnn_r_v_1x1')(r_v)
 
-    r_u = KL.TimeDistributed(KL.Conv2D(512, (3, 3), padding="same"),
-                             name="mrcnn_r_u_conv3")(r_u)
-    r_u = KL.TimeDistributed(BatchNorm(),
-                             name='mrcnn_r_u_bn3')(r_u, training=train_bn)
-    r_u = KL.Activation('relu')(r_u)
-
-    r_u = KL.TimeDistributed(KL.Conv2D(512, (3, 3), padding="same"),
-                             name="mrcnn_r_u_conv4")(r_u)
-    r_u = KL.TimeDistributed(BatchNorm(),
-                             name='mrcnn_r_u_bn4')(r_u, training=train_bn)
-    r_u = KL.Activation('relu')(r_u)
-
-    # Regression layer
-    r_u = KL.TimeDistributed(KL.Dense(10, activation='sigmoid'))(r_u)
-
-    # Branch for real v regression
-    r_v = KL.TimeDistributed(KL.Conv2D(512, (3, 3), padding="same"),
-                             name="mrcnn_r_v_conv1")(x)
-    r_v = KL.TimeDistributed(BatchNorm(),
-                             name='mrcnn_r_v_bn1')(r_v, training=train_bn)
-    r_v = KL.Activation('relu')(r_v)
-
-    r_v = KL.TimeDistributed(KL.Conv2D(512, (3, 3), padding="same"),
-                             name="mrcnn_r_v_conv2")(r_v)
-    r_v = KL.TimeDistributed(BatchNorm(),
-                             name='mrcnn_r_v_bn2')(r_v, training=train_bn)
-    r_v = KL.Activation('relu')(r_v)
-
-    r_v = KL.TimeDistributed(KL.Conv2D(512, (3, 3), padding="same"),
-                             name="mrcnn_r_v_conv3")(r_v)
-    r_v = KL.TimeDistributed(BatchNorm(),
-                             name='mrcnn_r_v_bn3')(r_v, training=train_bn)
-    r_v = KL.Activation('relu')(r_v)
-
-    r_v = KL.TimeDistributed(KL.Conv2D(512, (3, 3), padding="same"),
-                             name="mrcnn_r_v_conv4")(r_v)
-    r_v = KL.TimeDistributed(BatchNorm(),
-                             name='mrcnn_r_v_bn4')(r_v, training=train_bn)
-    r_v = KL.Activation('relu')(r_v)
-
-    # Regression layer
-    r_v = KL.TimeDistributed(KL.Dense(10, activation='sigmoid'))(r_v)
-
-    return q_u, q_v, r_u, r_v
+    return c_i, r_u, r_v
 
 
 ############################################################
@@ -1313,35 +1245,82 @@ def mrcnn_mask_loss_graph(target_masks, target_class_ids, pred_masks):
     return loss
 
 
-def mrcnn_q_u_loss(predicted_q_u, target_q_u):
+def mrcnn_c_i_loss_graph(predicted_c_i, target_class_ids, target_c_i):
     """Softmax cross entropy quantized u loss """
 
-    sm = KL.Activation("softmax",
-                       name="rpn_class_xxx")(predicted_q_u)
-    loss = K.categorical_crossentropy(target=target_q_u, output=sm)
+    # Reshape for simplicity. Merge first two dimensions into one.
+    target_class_ids = K.reshape(target_class_ids, (-1,))
+    target_shape = tf.shape(target_c_i)
+    target_c_i = K.reshape(target_c_i, (-1, target_shape[2], target_shape[3]))
+    pred_shape = tf.shape(predicted_c_i)
+    predicted_c_i = K.reshape(predicted_c_i,
+                           (-1, pred_shape[2], pred_shape[3], pred_shape[4]))
+
+    # Calculate softmax over part dimension (maybe unnecessary)
+    c_i_shape = tf.shape(predicted_c_i)
+    c_i = tf.reshape(predicted_c_i, [-1, 25])
+    c_i = tf.nn.softmax(c_i)
+    predicted_c_i = tf.reshape(c_i, [-1, c_i_shape[2], c_i_shape[2], 25])
+
+    # Permute predicted masks to [N, num_classes, height, width]
+    predicted_c_i = tf.transpose(predicted_c_i, [0, 3, 1, 2])
+    # Reduce to indeces of max values
+    predicted_c_i = tf.argmax(predicted_c_i, axis=1)
+
+    # Only positive ROIs contribute to the loss.
+    positive_ix = tf.where(target_class_ids > 0)[:, 0]
+
+    # Only positive ROIs contribute to the loss
+    target_c_i = tf.gather(target_c_i, positive_ix)
+    predicted_c_i = tf.gather(predicted_c_i, positive_ix)
+
+
+    def pool_slice(x):
+        t_slice = x[0]
+        p_slice = x[1]
+        target_x = tf.cast(t_slice[0, :], tf.int32)
+        target_y = tf.cast(t_slice[1, :], tf.int32)
+        sample_pos = tf.fill((pred_shape[2], pred_shape[2]), -1)
+        coords = tf.transpose(tf.stack([target_x, target_y]))
+        # get tensor with 1's at positions (row1, col1),...
+        binary_mask = tf.sparse_to_dense(coords, tf.shape(sample_pos), 1)
+
+        # convert 1/0 to True/False
+        binary_mask = tf.cast(binary_mask, tf.bool)
+
+        pooled_mask = tf.where(binary_mask, tf.cast(p_slice, tf.int32), sample_pos)
+        pos_ix = tf.where(pooled_mask > -1)
+
+        p_slice_new = tf.identity(t_slice)
+
+        def apply_value_given_index(y):
+
+        
+        tf.map_fn(apply_value_given_index, pos_ix)
+
+        for i, pos in enumerate(pos_ix):
+            p_slice_new[2, i] = pooled_mask[pos]
+
+        return (t_slice, p_slice_new)
+
+
+    (target_c_i, predicted_c_i) = tf.map_fn(pool_slice, (target_c_i, predicted_c_i), dtype=(tf.int32, tf.int32))
+
+    loss = K.categorical_crossentropy(target=target_c_i, output=predicted_c_i)
     loss = K.mean(loss)
     return loss
 
 
-def mrcnn_q_v_loss(predicted_q_v, target_q_v):
-    """Softmax cross entropy quantized v loss """
-    sm = KL.Activation("softmax",
-                       name="rpn_class_xxx")(predicted_q_v)
-    loss = K.categorical_crossentropy(target=target_q_v, output=sm)
-    loss = K.mean(loss)
-    return loss
-
-
-def mrcnn_r_u_loss(predicted_r_u, target_r_u):
+def mrcnn_r_u_loss_graph(predicted_r_u, target_r_u):
     """L1 regression u loss """
-    loss = smooth_l1_loss(target_r_u, predicted_r_u)
-    return loss
+    # loss = smooth_l1_loss(target_r_u, predicted_r_u)
+    return tf.constant(0.)
 
 
-def mrcnn_r_v_loss(predicted_r_v, target_r_v):
+def mrcnn_r_v_loss_graph(predicted_r_v, target_r_v):
     """L1 regression v loss """
-    loss = smooth_l1_loss(target_r_v, predicted_r_v)
-    return loss
+    # loss = smooth_l1_loss(target_r_v, predicted_r_v)
+    return tf.constant(0.)
 
 ############################################################
 #  Data Generator
@@ -1371,10 +1350,10 @@ def load_image_gt(dataset, config, image_id, augment=False, augmentation=None,
         of the image unless use_mini_mask is True, in which case they are
         defined in MINI_MASK_SHAPE.
     """
-    # Load image and mask
+    # Load image and mask and densepose information
     image = dataset.load_image(image_id)
     mask, class_ids = dataset.load_mask(image_id)
-    uv = dataset.load_uv(image_id) # TODO: update with UV mask
+    dps, dp_masks = dataset.load_uv(image_id) # TODO: update with UV mask
     original_shape = image.shape
     image, window, scale, padding, crop = utils.resize_image(
         image,
@@ -1449,7 +1428,8 @@ def load_image_gt(dataset, config, image_id, augment=False, augmentation=None,
     image_meta = compose_image_meta(image_id, original_shape, image.shape,
                                     window, scale, active_class_ids)
 
-    return image, image_meta, class_ids, bbox, mask, uv
+    # TODO: dps and dp_masks resize
+    return image, image_meta, class_ids, bbox, mask, dps, dp_masks
 
 
 def build_detection_targets(rpn_rois, gt_class_ids, gt_boxes, gt_masks, config):
@@ -1870,7 +1850,7 @@ def data_generator(dataset, config, shuffle=True, augment=False, augmentation=No
             #                  augmentation=None,
             #                  use_mini_mask=config.USE_MINI_MASK)
             #else:
-            image, image_meta, gt_class_ids, gt_boxes, gt_masks, gt_uv = \
+            image, image_meta, gt_class_ids, gt_boxes, gt_masks, gt_dp, gt_dp_masks = \
                 load_image_gt(dataset, config, image_id, augment=augment,
                 augmentation=augmentation,
                 use_mini_mask=config.USE_MINI_MASK)
@@ -1911,6 +1891,9 @@ def data_generator(dataset, config, shuffle=True, augment=False, augmentation=No
                 batch_gt_masks = np.zeros(
                     (batch_size, gt_masks.shape[0], gt_masks.shape[1],
                      config.MAX_GT_INSTANCES), dtype=gt_masks.dtype)
+                batch_gt_dp = np.zeros(
+                    (batch_size, gt_dp.shape[0], gt_dp.shape[1],
+                     config.MAX_GT_INSTANCES), dtype=gt_dp.dtype)
                 if random_rois:
                     batch_rpn_rois = np.zeros(
                         (batch_size, rpn_rois.shape[0], 4), dtype=rpn_rois.dtype)
@@ -1940,6 +1923,7 @@ def data_generator(dataset, config, shuffle=True, augment=False, augmentation=No
             batch_gt_class_ids[b, :gt_class_ids.shape[0]] = gt_class_ids
             batch_gt_boxes[b, :gt_boxes.shape[0]] = gt_boxes
             batch_gt_masks[b, :, :, :gt_masks.shape[-1]] = gt_masks
+            batch_gt_dp[b, :, :, :gt_dp.shape[-1]] = gt_dp
             if random_rois:
                 batch_rpn_rois[b] = rpn_rois
                 if detection_targets:
@@ -1952,7 +1936,7 @@ def data_generator(dataset, config, shuffle=True, augment=False, augmentation=No
             # Batch full?
             if b >= batch_size:
                 inputs = [batch_images, batch_image_meta, batch_rpn_match, batch_rpn_bbox,
-                          batch_gt_class_ids, batch_gt_boxes, batch_gt_masks]
+                          batch_gt_class_ids, batch_gt_boxes, batch_gt_masks, batch_gt_dp]
                 outputs = []
 
                 if random_rois:
@@ -2053,7 +2037,13 @@ class MaskRCNN():
                     shape=[config.IMAGE_SHAPE[0], config.IMAGE_SHAPE[1], None],
                     name="input_gt_masks", dtype=bool)
             # 4. GT uv
-            # input_gt_uv = KL.Input(shape=[]) # TODO: Update with shapes
+            input_gt_uvs = KL.Input(shape=[5, 196, None], name="input_gt_uvs", dtype=tf.float32)
+            # input_gt_i = KL.Input(shape=[config.IMAGE_SHAPE[0], config.IMAGE_SHAPE[1], None],
+            #         name="input_gt_i", dtype=tf.int32) # TODO: Update with shapes
+            # input_gt_u = KL.Input(shape=[config.IMAGE_SHAPE[0], config.IMAGE_SHAPE[1], None],
+            #         name="input_gt_u", dtype=tf.float32)
+            # input_gt_v = KL.Input(shape=[config.IMAGE_SHAPE[0], config.IMAGE_SHAPE[1], None],
+            #         name="input_gt_v", dtype=tf.float32)
         elif mode == "inference":
             # Anchors in normalized coordinates
             input_anchors = KL.Input(shape=[None, 4], name="input_anchors")
@@ -2154,9 +2144,9 @@ class MaskRCNN():
             # Subsamples proposals and generates target outputs for training
             # Note that proposal class IDs, gt_boxes, and gt_masks are zero
             # padded. Equally, returned rois and targets are zero padded.
-            rois, target_class_ids, target_bbox, target_mask =\
+            rois, target_class_ids, target_bbox, target_mask, target_uvs=\
                 DetectionTargetLayer(config, name="proposal_targets")([
-                    target_rois, input_gt_class_ids, gt_boxes, input_gt_masks])
+                    target_rois, input_gt_class_ids, gt_boxes, input_gt_masks, input_gt_uvs])#, input_gt_i, input_gt_u, input_gt_v])
 
             # Network Heads
             # TODO: verify that this handles zero padded ROIs
@@ -2172,7 +2162,7 @@ class MaskRCNN():
                                               config.NUM_CLASSES,
                                               train_bn=config.TRAIN_BN)
 
-            q_u, q_v, r_u, r_v = build_fpn_uv_graph(rois, mrcnn_feature_maps,
+            c_i, r_u, r_v = build_fpn_uv_graph(rois, mrcnn_feature_maps,
                                               input_image_meta,
                                               config.MASK_POOL_SIZE,
                                               config.NUM_CLASSES,
@@ -2192,18 +2182,21 @@ class MaskRCNN():
                 [target_bbox, target_class_ids, mrcnn_bbox])
             mask_loss = KL.Lambda(lambda x: mrcnn_mask_loss_graph(*x), name="mrcnn_mask_loss")(
                 [target_mask, target_class_ids, mrcnn_mask])
-            # q_u_loss = KL.lambda(lambda x: mrcnn_q_u_loss(*x), name="mrcnn_q_u_loss")([q_u])
-            # TODO: uv losses
+            c_i_loss = KL.Lambda(lambda x: mrcnn_c_i_loss_graph(*x), name="mrcnn_c_i_loss")([c_i, target_class_ids, target_uvs])
+            #r_u_loss = KL.Lambda(lambda x: mrcnn_r_u_loss_graph(*x), name="mrcnn_r_u_loss")([r_u, target_uvs])
+            #r_v_loss = KL.Lambda(lambda x: mrcnn_r_v_loss_graph(*x), name="mrcnn_r_v_loss")([r_v, target_uvs])
+
 
             # Model
             inputs = [input_image, input_image_meta,
-                      input_rpn_match, input_rpn_bbox, input_gt_class_ids, input_gt_boxes, input_gt_masks]
+                      input_rpn_match, input_rpn_bbox, input_gt_class_ids, input_gt_boxes, input_gt_masks, input_gt_uvs]
             if not config.USE_RPN_ROIS:
                 inputs.append(input_rois)
             outputs = [rpn_class_logits, rpn_class, rpn_bbox,
-                       mrcnn_class_logits, mrcnn_class, mrcnn_bbox, mrcnn_mask,
+                       mrcnn_class_logits, mrcnn_class, mrcnn_bbox, mrcnn_mask, c_i,#, r_u, r_v,
                        rpn_rois, output_rois,
-                       rpn_class_loss, rpn_bbox_loss, class_loss, bbox_loss, mask_loss]
+                       rpn_class_loss, rpn_bbox_loss, class_loss, bbox_loss, mask_loss,
+                       c_i_loss]#, r_u_loss, r_v_loss]
             model = KM.Model(inputs, outputs, name='mask_rcnn')
         else:
             # Network Heads
@@ -2228,9 +2221,15 @@ class MaskRCNN():
                                               config.NUM_CLASSES,
                                               train_bn=config.TRAIN_BN)
 
+            c_i, r_u, r_v = build_fpn_uv_graph(detection_boxes, mrcnn_feature_maps,
+                                               input_image_meta,
+                                               config.MASK_POOL_SIZE,
+                                               config.NUM_CLASSES,
+                                               train_bn=config.TRAIN_BN)
+
             model = KM.Model([input_image, input_image_meta, input_anchors],
                              [detections, mrcnn_class, mrcnn_bbox,
-                              mrcnn_mask,
+                              mrcnn_mask, c_i, r_u, r_v,
                               rpn_rois, rpn_class, rpn_bbox],
                              name='mask_rcnn')
 

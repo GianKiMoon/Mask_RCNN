@@ -69,7 +69,7 @@ class DenseposeConfig(Config):
     # Give the configuration a recognizable name
     NAME = "densepose"
 
-    GPU_COUNT = 1
+    GPU_COUNT = 3
 
     # We use a GPU with 12GB memory, which can fit two images.
     # Adjust down if you use a smaller GPU.
@@ -82,7 +82,7 @@ class DenseposeConfig(Config):
     STEPS_PER_EPOCH = 100
 
     # Skip detections with < 90% confidence
-    DETECTION_MIN_CONFIDENCE = 0.9
+    # DETECTION_MIN_CONFIDENCE = 0.9
 
 
 ############################################################
@@ -185,29 +185,93 @@ class DenseposeDataset(utils.Dataset):
         if image_info["source"] != "coco":
             return super(DenseposeDataset, self).load_mask(image_id)
 
-        instance_uvs = []
+        instance_dps = []
+        instance_dp_masks = []
+        instance_bboxs = []
+        instance_i_masks = []
+        instance_u_masks = []
+        instance_v_masks = []
         class_ids = []
         annotations = self.image_info[image_id]["annotations"]
         # Build mask of shape [height, width, instance_count] and list
         # of class IDs that correspond to each channel of the mask.
-        for annotation in annotations:
-            class_id = self.map_source_class_id(
-                "coco.{}".format(annotation['category_id']))
-            if class_id:
-                uv = self.annToUV(annotation, image_info["height"],
-                                   image_info["width"])
+        for idx, annotation in enumerate(annotations):
+            if 'dp_masks' in annotation:
+                class_id = self.map_source_class_id(
+                    "coco.{}".format(annotation['category_id']))
+                if class_id:
+                    # Segmentation masks
+                    m = self.annToMask(annotation, image_info["height"],
+                                       image_info["width"])
+                    # Some objects are so small that they're less than 1 pixel area
+                    # and end up rounded out. Skip those objects.
+                    if m.max() < 1:
+                        continue
+                    # Is it a crowd? If so, use a negative class ID.
+                    if annotation['iscrowd']:
+                        # Use negative class ID for crowds
+                        class_id *= -1
+                        # For crowd masks, annToMask() sometimes returns a mask
+                        # smaller than the given dimensions. If so, resize it.
+                        if m.shape[0] != image_info["height"] or m.shape[1] != image_info["width"]:
+                            m = np.ones([image_info["height"], image_info["width"]], dtype=bool)
 
-                instance_uvs.append(uv)
-                class_ids.append(class_id)
+                    # DensePose stuff
+                    dp, dp_mask = self.annToUV(annotation, image_info["height"],
+                                       image_info["width"])
+                    bbr = np.array(annotation['bbox']).astype(int)
+                    i_mask, u_mask, v_mask = self.create_uv_supervision_masks(dp, bbr, m)
+                    instance_dps.append(dp)
+                    instance_dp_masks.append(dp_mask)
+                    instance_bboxs.append(bbr)
+                    class_ids.append(class_id)
+                    instance_i_masks.append(i_mask)
+                    instance_u_masks.append(u_mask)
+                    instance_v_masks.append(v_mask)
 
         # Pack instance masks into an array
         if class_ids:
-            uvs = np.stack(instance_uvs, axis=2)
-            class_ids = np.array(class_ids, dtype=np.int32)
-            return uvs
+            dps = np.stack(instance_dps, axis=2)
+            dp_masks = np.stack(instance_dp_masks, axis=2)
+            bboxs = np.stack(instance_bboxs, axis=1)
+
+            return dps, dp_masks
         else:
             # Call super class to return an empty mask
             return super(DenseposeDataset, self).load_mask(image_id)
+
+    def create_uv_supervision_masks(self, dp, bbox, mask):
+        dp_xy = dp[0:2, :]
+        dp_i = dp[2, :]
+
+        c_bbox = np.round(bbox)
+
+        i_mask = np.zeros(mask.shape, dtype=np.int32)
+        u_mask = np.zeros(mask.shape, dtype=np.float32)
+        v_mask = np.zeros(mask.shape, dtype=np.float32)
+        i_mask.fill(-1)
+        u_mask.fill(-1)
+        v_mask.fill(-1)
+
+        indeces = np.where(mask == 1)
+        i_mask[indeces] = -2
+
+        # Transform densepose xy to bbox
+        Point_x = dp_xy[0, :] / 255. * c_bbox[2]
+        Point_y = dp_xy[1, :] / 255. * c_bbox[3]
+        x1, y1, x2, y2 = c_bbox[0], c_bbox[1], c_bbox[0] + c_bbox[2], c_bbox[1] + c_bbox[3]
+        Point_x = np.round(Point_x + x1 + 1).astype(dtype=np.int32)
+        Point_y = np.round(Point_y + y1 + 1).astype(dtype=np.int32)
+
+
+        for i in range(dp_i.shape[0]):
+            if dp_i[i] != -1:
+                i_mask[Point_y[i], Point_x[i]] = dp_i[i]
+            else:
+                break
+
+
+        return i_mask, u_mask, v_mask
 
     def image_reference(self, image_id):
         """Return a link to the image in the COCO Website."""
@@ -241,34 +305,46 @@ class DenseposeDataset(utils.Dataset):
     def annToRLEForUV(self, ann, height, width):
         dp_masks = ann['dp_masks']
 
-        if isinstance(dp_masks['counts'], list):
+        dp_masks_rle = []
+
+        for dp_mask in dp_masks:
             # uncompressed RLE
-            dp_masks = maskUtils.frPyObjects(dp_masks, height, width)
-        elif isinstance(dp_masks, list):
-            # polygon -- a single object might consist of multiple parts
-            # we merge all parts into one mask rle code
-            rles = maskUtils.frPyObjects(dp_masks, height, width)
-            dp_masks = maskUtils.merge(rles)
+            dp_mask_rle = maskUtils.frPyObjects(dp_mask['counts'], height, width)
+            dp_masks_rle.append(dp_mask_rle)
 
+        return dp_masks_rle
 
-        return dp_masks
+    def GetDensePoseMask(self, Polys):
+        MaskGen = np.zeros([256, 256])
+        for i in range(1, 15):
+            if (Polys[i - 1]):
+                current_mask = maskUtils.decode(Polys[i - 1])
+                MaskGen[current_mask > 0] = i
+        return MaskGen
 
     def annToUV(self, ann, height, width):
-
-        
-        # rle = self.annToRLEForUV(ann, height, width)
-        # dp_masks = maskUtils.decode(rle)
+        # dp_masks_rles = self.annToRLEForUV(ann, height, width)
+        #
+        # dp_masks = []
+        # for rle in dp_masks_rles:
+        #     dp_masks.append(maskUtils.decode(rle))
+        scaling_factor_for_pooling = 0.22 # Hardcoded to output mask
+        dp_mask = self.GetDensePoseMask(ann['dp_masks'])
         dp_I = np.array(ann['dp_I'])
         dp_U = np.array(ann['dp_U'])
         dp_V = np.array(ann['dp_V'])
+        # Scale xy coords to output mask of network for loss pooling
         dp_x = np.array(ann['dp_x'])
+        dp_x = np.multiply(dp_x, scaling_factor_for_pooling);
         dp_y = np.array(ann['dp_y'])
+        dp_y = np.multiply(dp_y, scaling_factor_for_pooling);
 
         dp = np.stack([dp_x, dp_y, dp_I, dp_U, dp_V], axis=0)
-        rest = 336 - dp.shape[1]
-        dp = np.concatenate((dp, np.zeros([5, rest])), axis=1)
-
-        return dp
+        rest = 196 - dp.shape[1]
+        n = np.zeros([5, rest])
+        n.fill(-1)
+        dp = np.concatenate((dp, n), axis=1)
+        return dp, dp_mask
 
 
     def annToMask(self, ann, height, width):
