@@ -69,7 +69,7 @@ class DenseposeConfig(Config):
     # Give the configuration a recognizable name
     NAME = "densepose"
 
-    GPU_COUNT = 3
+    GPU_COUNT = 1
 
     # We use a GPU with 12GB memory, which can fit two images.
     # Adjust down if you use a smaller GPU.
@@ -152,6 +152,8 @@ class DenseposeDataset(utils.Dataset):
         for annotation in annotations:
             class_id = self.map_source_class_id(
                 "coco.{}".format(annotation['category_id']))
+
+                
             if class_id:
                 m = self.annToMask(annotation, image_info["height"],
                                    image_info["width"])
@@ -185,21 +187,75 @@ class DenseposeDataset(utils.Dataset):
         if image_info["source"] != "coco":
             return super(DenseposeDataset, self).load_mask(image_id)
 
+        #print(image_info)
+
         instance_dps = []
         instance_dp_masks = []
         instance_bboxs = []
-        instance_i_masks = []
-        instance_u_masks = []
-        instance_v_masks = []
         class_ids = []
         annotations = self.image_info[image_id]["annotations"]
         # Build mask of shape [height, width, instance_count] and list
         # of class IDs that correspond to each channel of the mask.
+
+        #print("--------->")
+        #print(annotations)
+        #print(len(annotations))
+        
+        counter = 0
+
         for idx, annotation in enumerate(annotations):
+            class_id = self.map_source_class_id(
+                "coco.{}".format(annotation['category_id']))
+
+            #print(class_id)
+            # print(counter)
+            counter = counter + 1
+
             if 'dp_masks' in annotation:
-                class_id = self.map_source_class_id(
-                    "coco.{}".format(annotation['category_id']))
-                if class_id:
+               
+                dp, dp_mask  = self.annToUV(annotation, image_info["height"],
+                                       image_info["width"]) 
+                assert (dp.shape == (5, 196))
+                instance_dps.append(dp)
+                instance_dp_masks.append(dp_mask)   
+                class_ids.append(class_id)
+            else:
+                '''
+                dp = np.zeros(shape=(5, 196))
+                dp = dp.fill(-1)
+                assert (dp.shape == (5, 196))
+                instance_dps.append(dp)
+                class_ids.append(class_id)'''
+
+
+        #print(class_ids)
+
+        if class_ids:
+            #print("Stack 1")
+            dps = np.stack(instance_dps, axis=2)
+            #print(dps)
+            #dp_masks = np.stack(instance_dp_masks, axis=2)
+            
+            #print("Stack 2")
+            #bboxs = np.stack(instance_bboxs, axis=1)
+            #print("HIHIHIHIHIHIHI")
+            #print(dps)
+            return dps
+        else:
+            #print("i")
+            # Call super class to return an empty mask
+            return super(DenseposeDataset, self).load_mask(image_id)
+
+###
+        '''
+        for idx, annotation in enumerate(annotations):
+            class_id = self.map_source_class_id(
+                "coco.{}".format(annotation['category_id']))
+
+            print(class_id)
+
+            if class_id:
+                if 'dp_masks' in annotation:
                     # Segmentation masks
                     m = self.annToMask(annotation, image_info["height"],
                                        image_info["width"])
@@ -216,29 +272,30 @@ class DenseposeDataset(utils.Dataset):
                         if m.shape[0] != image_info["height"] or m.shape[1] != image_info["width"]:
                             m = np.ones([image_info["height"], image_info["width"]], dtype=bool)
 
+                    print(">>load_uv")
+                    print("INdex",idx)
+                    
                     # DensePose stuff
-                    dp, dp_mask = self.annToUV(annotation, image_info["height"],
-                                       image_info["width"])
-                    bbr = np.array(annotation['bbox']).astype(int)
-                    i_mask, u_mask, v_mask = self.create_uv_supervision_masks(dp, bbr, m)
-                    instance_dps.append(dp)
-                    instance_dp_masks.append(dp_mask)
-                    instance_bboxs.append(bbr)
-                    class_ids.append(class_id)
-                    instance_i_masks.append(i_mask)
-                    instance_u_masks.append(u_mask)
-                    instance_v_masks.append(v_mask)
+                    # dp, dp_mask = self.annToUV(annotation, image_info["height"],
+                    #                   image_info["width"])
+                    dp = np.zeros((5, 196))
+                    # bbr = np.array(annotation['bbox']).astype(int)
+                    # i_mask, u_mask, v_mask = self.create_uv_supervision_masks(dp, bbr, m)
+
+                    # instance_i_masks.append(i_mask)
+                    # instance_u_masks.append(u_mask)
+                    # instance_v_masks.append(v_mask)
+                else:
+                    dp = np.zeros((5, 196))
+                # instance_bboxs.append(bbr)
+                class_ids.append(class_id)
+                instance_dps.append(dp)
+                #instance_dp_masks.append(dp_mask)
+        '''
 
         # Pack instance masks into an array
-        if class_ids:
-            dps = np.stack(instance_dps, axis=2)
-            dp_masks = np.stack(instance_dp_masks, axis=2)
-            bboxs = np.stack(instance_bboxs, axis=1)
 
-            return dps, dp_masks
-        else:
-            # Call super class to return an empty mask
-            return super(DenseposeDataset, self).load_mask(image_id)
+
 
     def create_uv_supervision_masks(self, dp, bbox, mask):
         dp_xy = dp[0:2, :]
@@ -335,9 +392,9 @@ class DenseposeDataset(utils.Dataset):
         dp_V = np.array(ann['dp_V'])
         # Scale xy coords to output mask of network for loss pooling
         dp_x = np.array(ann['dp_x'])
-        dp_x = np.multiply(dp_x, scaling_factor_for_pooling);
+        dp_x = np.multiply(dp_x, scaling_factor_for_pooling)
         dp_y = np.array(ann['dp_y'])
-        dp_y = np.multiply(dp_y, scaling_factor_for_pooling);
+        dp_y = np.multiply(dp_y, scaling_factor_for_pooling)
 
         dp = np.stack([dp_x, dp_y, dp_I, dp_U, dp_V], axis=0)
         rest = 196 - dp.shape[1]
@@ -360,9 +417,11 @@ class DenseposeDataset(utils.Dataset):
 def train(model):
     """Train the model."""
     # Training dataset.
+
     dataset_train = DenseposeDataset()
-    dataset_train.load_densepose_coco(args.dataset, "train")
+    #dataset_train.load_densepose_coco(args.dataset, "train")
     dataset_train.prepare()
+
 
     # Validation dataset
     dataset_val = DenseposeDataset()
@@ -374,10 +433,12 @@ def train(model):
     # COCO trained weights, we don't need to train too long. Also,
     # no need to train all layers, just the heads should do it.
     print("Training network heads")
+
+
     model.train(dataset_train, dataset_val,
                 learning_rate=config.LEARNING_RATE,
-                epochs=30,
-                layers='heads')
+                epochs=1,
+                layers='all')
 
 
 # def detect_and_color_splash(model, image_path=None, video_path=None):
@@ -519,7 +580,7 @@ def main(_args):
         # number of classes
         model.load_weights(weights_path, by_name=True, exclude=[
             "mrcnn_class_logits", "mrcnn_bbox_fc",
-            "mrcnn_bbox", "mrcnn_mask", "mrcnn_mask_v", "mrcnn_mask_u"])
+            "mrcnn_bbox", "mrcnn_mask", "mrcnn_c_i_1x1", "mrcnn_r_u_1x1", "mrcnn_r_v_1x1"])
     else:
         model.load_weights(weights_path, by_name=True)
 
