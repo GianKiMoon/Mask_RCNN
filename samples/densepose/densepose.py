@@ -220,26 +220,17 @@ class DenseposeDataset(utils.Dataset):
                 instance_dp_masks.append(dp_mask)   
                 class_ids.append(class_id)
             else:
-                '''
-                dp = np.zeros(shape=(5, 196))
-                dp = dp.fill(-1)
+
+                dp = np.full((5, 196), -1)
                 assert (dp.shape == (5, 196))
                 instance_dps.append(dp)
-                class_ids.append(class_id)'''
-
-
-        #print(class_ids)
+                class_ids.append(class_id)
 
         if class_ids:
             #print("Stack 1")
             dps = np.stack(instance_dps, axis=2)
-            #print(dps)
             #dp_masks = np.stack(instance_dp_masks, axis=2)
-            
-            #print("Stack 2")
-            #bboxs = np.stack(instance_bboxs, axis=1)
-            #print("HIHIHIHIHIHIHI")
-            #print(dps)
+            print(dps.shape)
             return dps
         else:
             #print("i")
@@ -402,7 +393,6 @@ class DenseposeDataset(utils.Dataset):
         n.fill(-1)
         dp = np.concatenate((dp, n), axis=1)
         return dp, dp_mask
-
 
     def annToMask(self, ann, height, width):
         """

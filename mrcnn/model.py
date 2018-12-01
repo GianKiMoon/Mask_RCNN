@@ -13,6 +13,7 @@ import datetime
 import re
 import math
 import logging
+import sys
 from collections import OrderedDict
 import multiprocessing
 import numpy as np
@@ -513,6 +514,8 @@ def detection_targets_graph(proposals, gt_class_ids, gt_boxes, gt_masks, gt_uvs,
     with tf.control_dependencies(asserts):
         proposals = tf.identity(proposals)
 
+
+
     # Remove zero padding
     proposals, _ = trim_zeros_graph(proposals, name="trim_proposals")
     gt_boxes, non_zeros = trim_zeros_graph(gt_boxes, name="trim_gt_boxes")
@@ -520,7 +523,8 @@ def detection_targets_graph(proposals, gt_class_ids, gt_boxes, gt_masks, gt_uvs,
                                    name="trim_gt_class_ids")
     gt_masks = tf.gather(gt_masks, tf.where(non_zeros)[:, 0], axis=2,
                          name="trim_gt_masks")
-    # No need to remove zero padding for uv
+    #gt_uvs = tf.gather(gt_uvs, tf.where(non_zeros)[:, 0], axis=2,
+    #                    name="trim_gt_uvs")
 
     # Handle COCO crowds
     # A crowd box in COCO is a bounding box around several instances. Exclude
@@ -675,7 +679,6 @@ class DetectionTargetLayer(KE.Layer):
             lambda v, w, x, y, z: detection_targets_graph(
                 v, w, x, y, z, self.config),
             self.config.IMAGES_PER_GPU, names=names)
-        #print("Slice Outputs: ", outputs)
         return outputs
 
     def compute_output_shape(self, input_shape):
@@ -1287,20 +1290,12 @@ def tf_unique_2d(x):
     #sess = tf.Session()
     return (op)
 
-
-'''
-coor = tf.placeholder(tf.float32,[None,2],name="coor")
-
-uni = tf_unique_2d(coor)
-'''
-
 def mrcnn_c_i_loss_graph(predicted_c_i, target_class_ids, target_c_i):
-
-    #print("---")
-    #print(predicted_c_i)
     """Softmax cross entropy quantized u loss """
 
-   
+    print(target_c_i)
+    print(predicted_c_i)
+
     # Reshape for simplicity. Merge first two dimensions into one.
     target_class_ids = K.reshape(target_class_ids, (-1,))
     target_shape = tf.shape(target_c_i)
@@ -1310,10 +1305,10 @@ def mrcnn_c_i_loss_graph(predicted_c_i, target_class_ids, target_c_i):
                            (-1, pred_shape[2], pred_shape[3], pred_shape[4]))
 
     # Calculate softmax over part dimension (maybe unnecessary)
-    c_i_shape = tf.shape(predicted_c_i)
-    c_i = tf.reshape(predicted_c_i, [-1, 25])
-    c_i = tf.nn.softmax(c_i)
-    predicted_c_i = tf.reshape(c_i, [-1, c_i_shape[2], c_i_shape[2], 25])
+    #c_i_shape = tf.shape(predicted_c_i)
+    #c_i = tf.reshape(predicted_c_i, [-1, 25])
+    #c_i = tf.nn.softmax(c_i)
+    #predicted_c_i = tf.reshape(c_i, [-1, c_i_shape[2], c_i_shape[2], 25])
 
     # Permute predicted masks to [N, num_classes, height, width]
     predicted_c_i = tf.transpose(predicted_c_i, [0, 3, 1, 2])
@@ -1326,11 +1321,10 @@ def mrcnn_c_i_loss_graph(predicted_c_i, target_class_ids, target_c_i):
     predicted_c_i = tf.gather(predicted_c_i, positive_ix)
 
     def pool_slice(x):
-
         # Get target and prediction slice
         t_slice = x[0]
         p_slice = x[1]
-
+        print("t slice", t_slice)
         # Extract ground truth x and y coordinates from target slice
         target_x = tf.cast(t_slice[0, :], tf.int32)
         target_y = tf.cast(t_slice[1, :], tf.int32)
@@ -1338,19 +1332,12 @@ def mrcnn_c_i_loss_graph(predicted_c_i, target_class_ids, target_c_i):
         # Remove negative entries
         target_x = tf.reshape(tf.gather(target_x, tf.where(target_x > -1)), [-1])
         target_y = tf.reshape(tf.gather(target_y, tf.where(target_y > -1)), [-1])
-
-
-
+        print("Target x", target_x)
+        n = tf.shape(target_x)[0]
         sample_pos = tf.fill((pred_shape[2], pred_shape[2]), -1)
 
         # Format coords and filter out duplicates
         coords = tf.transpose(tf.stack([target_x, target_y]))
-
-
-        #print(coords.eval())
-        # with tf.Session() as sess:
-        #     sess = tf.Session()
-        #     uniques = sess.run(uni,feed_dict={coor: coords})
 
         #ones = tf.cast(tf.fill([tf.shape(coords)[0],], 1), tf.int64)
         #coords = tf.cast(coords, tf.int64)
@@ -1359,11 +1346,9 @@ def mrcnn_c_i_loss_graph(predicted_c_i, target_class_ids, target_c_i):
         #print(ones)
         #print(shape)
         #binary_mask = tf.SparseTensor(indices=coords, values=tf.cast(tf.constant(1.0), tf.int64), dense_shape=(tf.shape(sample_pos)[0], tf.shape(sample_pos)[1]))
-        binary_mask = tf.sparse_to_dense(coords, tf.shape(sample_pos), 1)#tf.sparse.to_dense(binary_mask) #
+        binary_mask = tf.sparse_to_dense(coords, tf.shape(sample_pos), 1, validate_indices=False)#tf.sparse.to_dense(binary_mask) #
 
         print("BMask ", binary_mask)
-
-
 
         # convert 1/0 to True/False
         binary_mask = tf.cast(binary_mask, tf.bool)
@@ -1372,54 +1357,61 @@ def mrcnn_c_i_loss_graph(predicted_c_i, target_class_ids, target_c_i):
         p_slice_flat = tf.reshape(p_slice, [-1])
 
         pooled_vals = tf.boolean_mask(p_slice_flat, binary_mask)
+        print("Pooled ", pooled_vals)
+        t = 196 - n
+        paddings = tf.concat( ([[0, 0]], [[0, t]]), axis=0)
+        pooled_vals = tf.reshape(pooled_vals, [-1, 1])
+        print("Pooled ", pooled_vals)
+        print("Paddings ", paddings)
+        pooled_vals = tf.pad(pooled_vals, paddings, 'CONSTANT', constant_values=-1)
+        pooled_vals = tf.reshape(pooled_vals, [-1])
 
         t_slice_0 = tf.boolean_mask(t_slice[0, :], binary_mask)
+        t_slice_0 = tf.reshape(t_slice_0, [-1, 1])
+        t_slice_0 = tf.pad(t_slice_0, paddings, 'CONSTANT', constant_values=-1)
+        t_slice_0 = tf.reshape(t_slice_0, [-1])
+
         t_slice_1 = tf.boolean_mask(t_slice[1, :], binary_mask)
+        t_slice_1 = tf.reshape(t_slice_1, [-1, 1])
+        t_slice_1 = tf.pad(t_slice_1, paddings, 'CONSTANT', constant_values=-1)
+        t_slice_1 = tf.reshape(t_slice_1, [-1])
+
         t_slice_2 = tf.boolean_mask(t_slice[2, :], binary_mask)
+        t_slice_2 = tf.reshape(t_slice_2, [-1, 1])
+        t_slice_2 = tf.pad(t_slice_2, paddings, 'CONSTANT', constant_values=-1)
+        t_slice_2 = tf.reshape(t_slice_2, [-1])
+
         t_slice_3 = tf.boolean_mask(t_slice[3, :], binary_mask)
+        t_slice_3 = tf.reshape(t_slice_3, [-1, 1])
+        t_slice_3 = tf.pad(t_slice_3, paddings, 'CONSTANT', constant_values=-1)
+        t_slice_3 = tf.reshape(t_slice_3, [-1])
+
         t_slice_4 = tf.boolean_mask(t_slice[4, :], binary_mask)
-        
-        # pooled_mask = tf.where(binary_mask, tf.cast(p_slice, tf.int32), sample_pos)
-        
+        t_slice_4 = tf.reshape(t_slice_4, [-1, 1])
+        t_slice_4 = tf.pad(t_slice_4, paddings, 'CONSTANT', constant_values=-1)
+        t_slice_4 = tf.reshape(t_slice_4, [-1])
+
         p_slice_new = tf.stack([t_slice_0, t_slice_1, tf.cast(pooled_vals, tf.float32), t_slice_3, t_slice_4])
         t_slice_new = tf.stack([t_slice_0, t_slice_1, t_slice_2, t_slice_3, t_slice_4])
 
+        #p_slice_new = tf.reshape(p_slice_new, [5, 196])
+        #t_slice_new = tf.reshape(t_slice_new, [5, 196])
+        # Add print operation
+        print(p_slice_new, t_slice_new)
         return (t_slice_new, p_slice_new)
 
-    #(target_c_i, predicted_c_i) = tf.map_fn(pool_slice, (target_c_i, predicted_c_i), dtype=(tf.int32, tf.int32))
-    
-
-    
-    #custom_pool_slice
-    # For tests
-    def custom_slice(x):
-        
-
-        t_slice = x[0]
-        p_slice = x[1]
-
-        print(t_slice)
-
-        target_x = t_slice[0, :]
-        target_y = t_slice[1, :]
-        sample_pos = tf.fill((pred_shape[2], pred_shape[2]), -1)
-        coords = tf.transpose(tf.stack([target_x, target_y]))
-
-        p_slice_new = tf.identity(t_slice)
-
-        return (t_slice, p_slice_new)
-
-    
-    #(target_c_i, predicted_c_i) = tf.map_fn(custom_slice, (target_c_i, predicted_c_i))
-    (target_c_i, predicted_c_i) = tf.map_fn(pool_slice, (target_c_i, predicted_c_i))
+    target_c_i = tf.reshape(target_c_i, [-1, 5, 196])
+    predicted_c_i = tf.reshape(predicted_c_i, [-1, 56, 56])
+    print("Target_c_i ", target_c_i)
+    print("p_c_i ", predicted_c_i)
+    (target_c_i, predicted_c_i) = tf.map_fn(pool_slice, (target_c_i, predicted_c_i), dtype=(tf.float32, tf.float32), infer_shape=False)
 
     target_c_i = tf.cast(target_c_i, tf.float32)
     predicted_c_i = tf.cast(predicted_c_i, tf.float32)
 
-    loss = K.categorical_crossentropy(target=target_c_i, output=predicted_c_i)
+    loss = keras.losses.mean_squared_error(target_c_i, predicted_c_i)
     loss = K.mean(loss)
-    
-    #return tf.constant(1.0)
+
     return loss
 
 
@@ -1464,15 +1456,8 @@ def load_image_gt(dataset, config, image_id, augment=False, augmentation=None,
     """
     # Load image and mask and densepose information
     image = dataset.load_image(image_id)
-
     mask, class_ids = dataset.load_mask(image_id)
-   
-    dps = dataset.load_uv(image_id) # TODO: update with UV mask
-    #print("DPSSS")
-    #print(mask.shape)
-    #print(dps.shape)
-
-
+    dps = dataset.load_uv(image_id)
 
     original_shape = image.shape
     image, window, scale, padding, crop = utils.resize_image(
@@ -1528,6 +1513,7 @@ def load_image_gt(dataset, config, image_id, augment=False, augmentation=None,
     _idx = np.sum(mask, axis=(0, 1)) > 0
     mask = mask[:, :, _idx]
     class_ids = class_ids[_idx]
+    dps = dps[:, :, _idx]
     # Bounding boxes. Note that some boxes might be all zeros
     # if the corresponding mask got cropped out.
     # bbox: [num_instances, (y1, x1, y2, x2)]
@@ -1940,9 +1926,8 @@ def coco_data_loader(dataset, config, shuffle=False, augment=False, augmentation
             #image, image_meta, gt_class_ids, gt_boxes, gt_masks, gt_dp = \
             
             image, image_meta, gt_class_ids, gt_boxes, gt_masks, gt_dp = load_image_gt(dataset, config, image_id, augment=augment,
-                augmentation=augmentation,
+                augmentation=None, # TODO: reenable by passing augmentation instead of None
                 use_mini_mask=config.USE_MINI_MASK)
-
                  
             # Skip images that have no instances. This can happen in cases
             # where we train on a subset of classes and the image doesn't
@@ -1957,6 +1942,7 @@ def coco_data_loader(dataset, config, shuffle=False, augment=False, augmentation
 
             # Mask R-CNN Targets
             if random_rois:
+                print("ATTENTION: Using random_rois, but is not implemented")
                 rpn_rois = generate_random_rois(
                     image.shape, random_rois, gt_class_ids, gt_boxes)
                 if detection_targets:
@@ -1982,7 +1968,6 @@ def coco_data_loader(dataset, config, shuffle=False, augment=False, augmentation
                     (batch_size, config.MAX_GT_INSTANCES), dtype=np.int32)
                 batch_gt_boxes = np.zeros(
                     (batch_size, config.MAX_GT_INSTANCES, 4), dtype=np.int32)
-
                 batch_gt_masks = np.zeros(
                     (batch_size, gt_masks.shape[0], gt_masks.shape[1],
                      config.MAX_GT_INSTANCES), dtype=gt_masks.dtype)
@@ -2011,7 +1996,6 @@ def coco_data_loader(dataset, config, shuffle=False, augment=False, augmentation
                 gt_class_ids = gt_class_ids[ids]
                 gt_boxes = gt_boxes[ids]
                 gt_masks = gt_masks[:, :, ids]
-
                 gt_dp = gt_dp[:, :, ids]
 
             # Add to batch
@@ -2022,6 +2006,7 @@ def coco_data_loader(dataset, config, shuffle=False, augment=False, augmentation
             batch_gt_class_ids[b, :gt_class_ids.shape[0]] = gt_class_ids
             batch_gt_boxes[b, :gt_boxes.shape[0]] = gt_boxes
             batch_gt_masks[b, :, :, :gt_masks.shape[-1]] = gt_masks
+
             batch_gt_dp[b, :, :, :gt_dp.shape[-1]] = gt_dp
             if random_rois:
                 batch_rpn_rois[b] = rpn_rois
@@ -2032,7 +2017,7 @@ def coco_data_loader(dataset, config, shuffle=False, augment=False, augmentation
                     batch_mrcnn_mask[b] = mrcnn_mask
             b += 1
 
-            print("Outputs.....")
+            #print("Outputs.....")
             #print(outputs)
 
             # Batch full?
@@ -2063,7 +2048,7 @@ def coco_data_loader(dataset, config, shuffle=False, augment=False, augmentation
             #logging.exception("Error in Coco_Data_loader {}".format(
             #    dataset.image_info[image_id]))
             error_count += 1
-            if error_count > 500:
+            if error_count > 5:
                 raise
 
 def data_generator(dataset, config, shuffle=True, augment=False, augmentation=None,
