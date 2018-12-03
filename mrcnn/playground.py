@@ -37,5 +37,11 @@ if __name__ == '__main__':
             print(ann['bbox'])
             dp = ann['dp_masks']
             # GetDensePoseMask(ann['dp_masks'])
-            print(get_dense_pose_mask(ann['dp_masks']))
+            y = np.array(ann['dp_y'])
+            y_scale = y/4.5
+            y_scale_floor = y//4.5
+            print(y)
+            print(y_scale)
+            print(y_scale_floor)
+            break
 

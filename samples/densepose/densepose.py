@@ -388,6 +388,7 @@ class DenseposeDataset(utils.Dataset):
         dp_y = np.multiply(dp_y, scaling_factor_for_pooling)
 
         dp = np.stack([dp_x, dp_y, dp_I, dp_U, dp_V], axis=0)
+        print("Found {} ground truth points for this instance".format(dp.shape[1]))
         rest = 196 - dp.shape[1]
         n = np.zeros([5, rest])
         n.fill(-1)
