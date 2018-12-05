@@ -69,7 +69,7 @@ class DenseposeConfig(Config):
     # Give the configuration a recognizable name
     NAME = "densepose"
 
-    GPU_COUNT = 1
+    GPU_COUNT = 3
 
     # We use a GPU with 12GB memory, which can fit two images.
     # Adjust down if you use a smaller GPU.
@@ -79,7 +79,7 @@ class DenseposeConfig(Config):
     NUM_CLASSES = 1 + 1   # Background + human
 
     # Number of training steps per epoch
-    STEPS_PER_EPOCH = 100
+    STEPS_PER_EPOCH = 1000
 
     # Skip detections with < 90% confidence
     # DETECTION_MIN_CONFIDENCE = 0.9
@@ -230,7 +230,7 @@ class DenseposeDataset(utils.Dataset):
             #print("Stack 1")
             dps = np.stack(instance_dps, axis=2)
             #dp_masks = np.stack(instance_dp_masks, axis=2)
-            print(dps.shape)
+            #print(dps.shape)
             return dps
         else:
             #print("i")
@@ -376,7 +376,7 @@ class DenseposeDataset(utils.Dataset):
         # dp_masks = []
         # for rle in dp_masks_rles:
         #     dp_masks.append(maskUtils.decode(rle))
-        scaling_factor_for_pooling = 0.22 # Hardcoded to output mask
+        scaling_factor_for_pooling = 0.21875 # Hardcoded to output mask
         dp_mask = self.GetDensePoseMask(ann['dp_masks'])
         dp_I = np.array(ann['dp_I'])
         dp_U = np.array(ann['dp_U'])
@@ -388,7 +388,7 @@ class DenseposeDataset(utils.Dataset):
         dp_y = np.multiply(dp_y, scaling_factor_for_pooling)
 
         dp = np.stack([dp_x, dp_y, dp_I, dp_U, dp_V], axis=0)
-        print("Found {} ground truth points for this instance".format(dp.shape[1]))
+        #print("Found {} ground truth points for this instance".format(dp.shape[1]))
         rest = 196 - dp.shape[1]
         n = np.zeros([5, rest])
         n.fill(-1)
@@ -410,7 +410,7 @@ def train(model):
     # Training dataset.
 
     dataset_train = DenseposeDataset()
-    #dataset_train.load_densepose_coco(args.dataset, "train")
+    dataset_train.load_densepose_coco(args.dataset, "train")
     dataset_train.prepare()
 
 
@@ -423,12 +423,11 @@ def train(model):
     # Since we're using a very small dataset, and starting from
     # COCO trained weights, we don't need to train too long. Also,
     # no need to train all layers, just the heads should do it.
-    print("Training network heads")
-
+    print("Training all layers")
 
     model.train(dataset_train, dataset_val,
                 learning_rate=config.LEARNING_RATE,
-                epochs=1,
+                epochs=50,
                 layers='all')
 
 

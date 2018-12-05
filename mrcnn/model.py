@@ -673,7 +673,7 @@ class DetectionTargetLayer(KE.Layer):
 
         # Slice the batch and run a graph for each slice
         # TODO: Rename target_bbox to target_deltas for clarity
-        names = ["rois", "target_class_ids", "target_bbox", "target_mask", "target_uv"] #, "target_c_i", "target_r_u", "target_r_v"]
+        names = ["rois", "target_class_ids", "target_bbox", "target_mask", "target_uv"]
         outputs = utils.batch_slice(
             [proposals, gt_class_ids, gt_boxes, gt_masks, gt_uvs],
             lambda v, w, x, y, z: detection_targets_graph(
@@ -1072,8 +1072,6 @@ def build_fpn_uv_graph(rois, feature_maps, image_meta,
     #  1 x 1 Convolution, number of channels respond to k quantized areas of u
     r_v = KL.TimeDistributed(KL.Conv2D(1, (1, 1), strides=1, activation="sigmoid"), name='mrcnn_r_v_1x1')(r_v)
 
-
-
     return c_i, r_u, r_v
 
 
@@ -1288,7 +1286,7 @@ def tf_unique_2d(x):
     op = tf.gather(x, r_cond_mul4)
 
     #sess = tf.Session()
-    return (op)
+    return (op, r_cond_mul4)
 
 def mrcnn_c_i_loss_graph(predicted_c_i, target_class_ids, target_c_i):
     """Softmax cross entropy quantized u loss """
@@ -1326,150 +1324,312 @@ def mrcnn_c_i_loss_graph(predicted_c_i, target_class_ids, target_c_i):
         target_x = tf.cast(t_slice[0, :], tf.int32)
         target_y = tf.cast(t_slice[1, :], tf.int32)
 
-        p0 = tf.Print(target_x, [tf.shape(target_x), target_x, tf.shape(target_y), target_y], "--Targetx and y unprocessed: ", summarize=300)
-
         # Remove negative entries
-        target_x = tf.reshape(tf.gather(p0, tf.where(target_x > -1)), [-1])
+        target_x = tf.reshape(tf.gather(target_x, tf.where(target_x > -1)), [-1])
         target_y = tf.reshape(tf.gather(target_y, tf.where(target_y > -1)), [-1])
 
-        shape_target_x = tf.shape(target_x)[0]
-
         def do_pool():
-            n = tf.shape(target_x)[0]
             sample_pos = tf.fill((pred_shape[2], pred_shape[2]), -1)
 
-            p1 = tf.Print(target_x, [tf.shape(target_x), target_x, tf.shape(target_y), target_y], "---Target x and y shapes and entries in do_pool: ", summarize=300)
-
             # Format coords and filter out duplicates
-            coords = tf.transpose(tf.stack([target_y, p1]))
+            coords = tf.transpose(tf.stack([target_y, target_x]))
 
-            unique_coords = tf_unique_2d(coords)
-            p = tf.concat(([[0, tf.shape(coords)[0] - tf.shape(unique_coords)[0]]], [[0, 0]]), axis=0)
-            unique_coords_pad = tf.pad(unique_coords, p, 'CONSTANT', constant_values=1)
-            diff = tf.where((coords - unique_coords_pad) > 0)
+            # Get the unique coordinates and find index of duplicate ones
+            unique_coords, unique_coords_idx = tf_unique_2d(coords)
 
-            t_slice_unique = tf.concat([tf.slice(t_slice, [0, 0], [-1, diff[0, 0]-1]),
-                                    tf.slice(t_slice, [0, diff[0, 0]], [-1, -1])], 1)
-            p2 = tf.Print(unique_coords, [tf.shape(coords), coords, tf.shape(t_slice_unique)], "---Coords shape and entries: ", summarize=100)
+            # Get ground truth slice gathered by unique coords and without negative entries
+            t_slice_2 = tf.cast(t_slice[2, :], tf.int32)
+            t_slice_2 = tf.reshape(tf.gather(t_slice_2, tf.where(target_x > -1)), [-1])
+            t_slice_2_unique = tf.gather(t_slice_2, unique_coords_idx)
 
-            #ones = tf.cast(tf.fill([tf.shape(coords)[0],], 1), tf.int64)
-            #coords = tf.cast(coords, tf.int64)
-            #shape = tf.cast(tf.shape(sample_pos), tf.int64)
-            #print(coords)
-            #print(ones)
-            #print("Shape ", shape)
-            #binary_mask = tf.SparseTensor(indices=coords, values=tf.cast(tf.constant(1.0), tf.int64), dense_shape=(shape[0], shape[1]))
-            binary_mask = tf.sparse_to_dense(p2, tf.shape(sample_pos), 1, validate_indices=False)#tf.sparse.to_dense(binary_mask) #
+            # Create binary mask of coords
+            max_coord = tf.reduce_max(unique_coords)
+            binary_mask = tf.sparse_to_dense(unique_coords, tf.shape(sample_pos), 1, validate_indices=False)
+            binary_mask = tf.cast(binary_mask, tf.bool)
+
+            # Analogue mask for point indeces
             coord_ix = tf.range(tf.shape(unique_coords)[0])
-            binary_mask_idx = tf.sparse_to_dense(unique_coords, tf.shape(sample_pos), coord_ix, default_value=-1, validate_indices=False)
-            p3 = tf.Print(binary_mask, [tf.shape(binary_mask), binary_mask], "---Binary mask shape and entries: ")
+            binary_mask_idx = tf.sparse_to_dense(unique_coords, tf.shape(sample_pos), coord_ix,
+                                                 default_value=-1, validate_indices=False)
 
-            # convert 1/0 to True/False
-            binary_mask = tf.cast(p3, tf.bool)
-
+            # Reshape masks
             binary_mask = tf.reshape(binary_mask, [-1])
             binary_mask_idx = tf.reshape(binary_mask_idx, [-1])
+
+            # Pool the actual prediction (do the same to the indeces
             p_slice_flat = tf.reshape(p_slice, [-1])
             pooled_idx = tf.boolean_mask(binary_mask_idx, binary_mask)
-            p32 = tf.Print(binary_mask, [tf.shape(pooled_idx), pooled_idx], "---Pooled idx: ", summarize=300)
-            pooled_vals = tf.boolean_mask(p_slice_flat, p32)
+            pooled_vals = tf.boolean_mask(p_slice_flat, binary_mask)
 
-            tensor_to_sort = tf.transpose(tf.stack([tf.cast(pooled_vals, tf.int32), tf.cast(pooled_idx, tf.int32)]))
-
+            # Sort pooled indexes (descending) and reverse: now the pooled values are arranged compatible to the gt
             pooled_vals_sorted_reversed = tf.gather(pooled_vals, tf.nn.top_k(pooled_idx,
                                                                              k=tf.shape(pooled_idx)[0]).indices)
             pooled_vals_sorted = tf.reverse(pooled_vals_sorted_reversed, [-1])
 
-            t = 196 - tf.shape(pooled_vals)[0]
+            t = 196 - tf.shape(pooled_vals_sorted)[0]
             paddings = tf.concat( ([[0, 0]], [[0, t]]), axis=0)
-            p4 = tf.Print(pooled_vals, [tensor_to_sort, pooled_vals_sorted], "---Sort before and after: ", summarize=200)
 
-            pooled_vals = tf.reshape(p4, [1, -1])
-            p45 = tf.Print(pooled_vals, [tf.shape(pooled_vals), pooled_vals], "---Pooled vals after reshape: ")
-            pooled_vals = tf.pad(p45, paddings, 'CONSTANT', constant_values=-1)
-            pooled_vals = tf.reshape(pooled_vals, [-1])
+            pooled_vals_sorted = tf.reshape(pooled_vals_sorted, [1, -1])
+            pooled_vals_sorted = tf.pad(pooled_vals_sorted, paddings, 'CONSTANT', constant_values=-1)
+            pooled_vals_sorted = tf.reshape(pooled_vals_sorted, [-1])
 
-            p5 = tf.Print(pooled_vals, [tf.shape(pooled_vals), pooled_vals], "---Pooled vals after: ", summarize=200)
+            t_slice_2_unique = tf.reshape(t_slice_2_unique, [1, -1])
+            t_slice_2_unique = tf.pad(t_slice_2_unique, paddings, 'CONSTANT', constant_values=-1)
+            t_slice_2_unique = tf.reshape(t_slice_2_unique, [-1])
 
-            t_slice_0 = t_slice[0, :]
-            t_slice_1 = t_slice[1, :]
-            t_slice_2 = t_slice[2, :]
-            t_slice_3 = t_slice[3, :]
-            t_slice_4 = t_slice[4, :]
-            # p6 = tf.Print(t_slice_0, [tf.shape(t_slice_0), t_slice_0], "---T_slice_0 before: ", summarize=200)
-            # #t_slice_0 = tf.reshape(p6, [-1])
-            # t_slice_0 = tf.boolean_mask(p6, binary_mask)
-            # p7 = tf.Print(t_slice_0, [tf.shape(t_slice_0), t_slice_0], "---T_slice_0 after mask: ", summarize=200)
-            # t_slice_0 = tf.reshape(p7, [1, -1])
-            # t_slice_0 = tf.pad(t_slice_0, paddings, 'CONSTANT', constant_values=-1)
-            # p8 = tf.Print(t_slice_0, [tf.shape(t_slice_0), t_slice_0], "---T_slice_0 after padding: ", summarize=200)
-            # t_slice_0 = tf.reshape(p8, [-1])
-
-            # t_slice_1 = tf.boolean_mask(t_slice[1, :], binary_mask)
-            # t_slice_1 = tf.reshape(t_slice_1, [1, -1])
-            # t_slice_1 = tf.pad(t_slice_1, paddings, 'CONSTANT', constant_values=-1)
-            # t_slice_1 = tf.reshape(t_slice_1, [-1])
-            #
-            # t_slice_2 = tf.boolean_mask(t_slice[2, :], binary_mask)
-            # t_slice_2 = tf.reshape(t_slice_2, [1, -1])
-            # t_slice_2 = tf.pad(t_slice_2, paddings, 'CONSTANT', constant_values=-1)
-            # t_slice_2 = tf.reshape(t_slice_2, [-1])
-            #
-            # t_slice_3 = tf.boolean_mask(t_slice[3, :], binary_mask)
-            # t_slice_3 = tf.reshape(t_slice_3, [1, -1])
-            # t_slice_3 = tf.pad(t_slice_3, paddings, 'CONSTANT', constant_values=-1)
-            # t_slice_3 = tf.reshape(t_slice_3, [-1])
-            #
-            # t_slice_4 = tf.boolean_mask(t_slice[4, :], binary_mask)
-            # t_slice_4 = tf.reshape(t_slice_4, [1, -1])
-            # t_slice_4 = tf.pad(t_slice_4, paddings, 'CONSTANT', constant_values=-1)
-            # t_slice_4 = tf.reshape(t_slice_4, [-1])
-
-            p_slice_new = tf.stack([t_slice_0, t_slice_1, tf.cast(p5, tf.float32), t_slice_3, t_slice_4])
-            t_slice_new = tf.stack([t_slice_0, t_slice_1, t_slice_2, t_slice_3, t_slice_4])
-
-            p10 = tf.Print(p_slice_new, [tf.shape(p_slice_new), p_slice_new, tf.shape(t_slice_new), t_slice_new], "---Return p_slice_new and t_slice_new")
-
-            return (t_slice_new, p10)
+            return tf.cast(t_slice_2_unique, tf.int32), tf.cast(pooled_vals_sorted, tf.int32)
 
         t_slice_new, p_slice_new = tf.cond(tf.greater(tf.shape(target_x)[0], tf.zeros(shape=(), dtype=tf.int32)),
-                                           do_pool, lambda: (tf.zeros([5, 196]), tf.zeros([5, 196])))
+                                           do_pool, lambda: (tf.zeros([196], dtype=tf.int32), tf.zeros([196],
+                                                                                                       dtype=tf.int32)))
 
-
-        p_slice_new = tf.reshape(p_slice_new, [5, 196])
-        t_slice_new = tf.reshape(t_slice_new, [5, 196])
+        p_slice_new = tf.cast(p_slice_new, tf.float32)
+        t_slice_new = tf.cast(t_slice_new, tf.float32)
 
         return (t_slice_new, p_slice_new)
 
     target_c_i = tf.reshape(target_c_i, [-1, 5, 196])
     predicted_c_i = tf.reshape(predicted_c_i, [-1, 56, 56])
 
-    p20 = tf.Print(target_c_i, [tf.shape(target_c_i), target_c_i, tf.shape(predicted_c_i), predicted_c_i], "-Target and predicted c_i before map")
+    (target_c_i, predicted_c_i) = tf.map_fn(pool_slice, (target_c_i, predicted_c_i), dtype=(tf.float32, tf.float32),
+                                            infer_shape=True)
 
-    (target_c_i, predicted_c_i) = tf.map_fn(pool_slice, (p20, predicted_c_i), dtype=(tf.float32, tf.float32), infer_shape=True, parallel_iterations=1)
+    target_c_i = tf.cast(target_c_i, tf.int32)
+    predicted_c_i = tf.cast(predicted_c_i, tf.int32)
 
-    p21 = tf.Print(target_c_i, [tf.shape(target_c_i), target_c_i, tf.shape(predicted_c_i), predicted_c_i],
-                   "-Target and predicted c_i after map")
-
-    target_c_i = tf.cast(p21, tf.float32)
-    predicted_c_i = tf.cast(predicted_c_i, tf.float32)
-
-    loss = keras.losses.mean_squared_error(target_c_i, predicted_c_i)
+    loss = keras.losses.categorical_crossentropy(tf.one_hot(target_c_i, 25), tf.one_hot(predicted_c_i, 25))
     loss = K.mean(loss)
-
     return loss
 
 
-def mrcnn_r_u_loss_graph(predicted_r_u, target_r_u):
+def mrcnn_r_u_loss_graph(predicted_r_u, target_class_ids, target_r_u):
     """L1 regression u loss """
-    # loss = smooth_l1_loss(target_r_u, predicted_r_u)
-    return tf.constant(0.0)
+    # Reshape for simplicity. Merge first two dimensions into one.
+    target_class_ids = K.reshape(target_class_ids, (-1,))
+    target_shape = tf.shape(target_r_u)
+    target_r_u = K.reshape(target_r_u, (-1, target_shape[2], target_shape[3]))
+    pred_shape = tf.shape(predicted_r_u)
+    predicted_r_u = K.reshape(predicted_r_u,
+                              (-1, pred_shape[2], pred_shape[3], pred_shape[4]))
+
+    # Calculate softmax over part dimension (maybe unnecessary)
+    # c_i_shape = tf.shape(predicted_c_i)
+    # c_i = tf.reshape(predicted_c_i, [-1, 25])
+    # c_i = tf.nn.softmax(c_i)
+    # predicted_c_i = tf.reshape(c_i, [-1, c_i_shape[2], c_i_shape[2], 25])
+
+    #p = tf.Print(predicted_r_u, [tf.shape(predicted_r_u), predicted_r_u], "-", summarize=200)
+
+    # Permute predicted masks to [N, num_classes, height, width]
+    predicted_r_u = tf.reshape(predicted_r_u, [-1, pred_shape[3], pred_shape[4]])
+    # Reduce to indeces of max values
+    #predicted_r_u = tf.transpose(predicted_r_u, [0, 3, 1, 2])
+    #predicted_r_u = tf.argmax(predicted_r_u, axis=1)
+
+    #p1 = tf.Print(predicted_r_u, [tf.shape(predicted_r_u), predicted_r_u], "--", summarize=200)
+
+    # Only positive ROIs contribute to the loss.
+    positive_ix = tf.where(target_class_ids > 0)[:, 0]
+    target_r_u = tf.gather(target_r_u, positive_ix)
+    predicted_r_u = tf.gather(predicted_r_u, positive_ix)
+
+    def pool_slice(x):
+        # Get target and prediction slice
+        t_slice = x[0]
+        p_slice = x[1]
+
+        # Extract ground truth x and y coordinates from target slice
+        target_x = tf.cast(t_slice[0, :], tf.int32)
+        target_y = tf.cast(t_slice[1, :], tf.int32)
+
+        # Remove negative entries
+        target_x = tf.reshape(tf.gather(target_x, tf.where(target_x > -1)), [-1])
+        target_y = tf.reshape(tf.gather(target_y, tf.where(target_y > -1)), [-1])
+
+        def do_pool():
+            sample_pos = tf.fill((pred_shape[2], pred_shape[2]), -1)
+
+            # Format coords and filter out duplicates
+            coords = tf.transpose(tf.stack([target_y, target_x]))
+
+            # Get the unique coordinates and find index of duplicate ones
+            unique_coords, unique_coords_idx = tf_unique_2d(coords)
+
+            # Get ground truth slice gathered by unique coords and without negative entries
+            t_slice_2 = tf.cast(t_slice[3, :], tf.float32)
+            t_slice_2 = tf.reshape(tf.gather(t_slice_2, tf.where(target_x > -1)), [-1])
+            t_slice_2_unique = tf.gather(t_slice_2, unique_coords_idx)
+
+            # Create binary mask of coords
+            binary_mask = tf.sparse_to_dense(unique_coords, tf.shape(sample_pos), 1, validate_indices=False)
+            binary_mask = tf.cast(binary_mask, tf.bool)
+
+            # Analogue mask for point indeces
+            coord_ix = tf.range(tf.shape(unique_coords)[0])
+            binary_mask_idx = tf.sparse_to_dense(unique_coords, tf.shape(sample_pos), coord_ix,
+                                                 default_value=-1, validate_indices=False)
+
+            # Reshape masks
+            binary_mask = tf.reshape(binary_mask, [-1])
+            binary_mask_idx = tf.reshape(binary_mask_idx, [-1])
+
+            # Pool the actual prediction (do the same to the indeces
+            p_slice_flat = tf.reshape(p_slice, [-1])
+            pooled_idx = tf.boolean_mask(binary_mask_idx, binary_mask)
+            pooled_vals = tf.boolean_mask(p_slice_flat, binary_mask)
+
+            # Sort pooled indexes (descending) and reverse: now the pooled values are arranged compatible to the gt
+            pooled_vals_sorted_reversed = tf.gather(pooled_vals, tf.nn.top_k(pooled_idx,
+                                                                             k=tf.shape(pooled_idx)[0]).indices)
+            pooled_vals_sorted = tf.reverse(pooled_vals_sorted_reversed, [-1])
+
+            t = 196 - tf.shape(pooled_vals_sorted)[0]
+            paddings = tf.concat(([[0, 0]], [[0, t]]), axis=0)
+
+            pooled_vals_sorted = tf.reshape(pooled_vals_sorted, [1, -1])
+            pooled_vals_sorted = tf.pad(pooled_vals_sorted, paddings, 'CONSTANT', constant_values=-1)
+            pooled_vals_sorted = tf.reshape(pooled_vals_sorted, [-1])
+
+            t_slice_2_unique = tf.reshape(t_slice_2_unique, [1, -1])
+            t_slice_2_unique = tf.pad(t_slice_2_unique, paddings, 'CONSTANT', constant_values=-1)
+            t_slice_2_unique = tf.reshape(t_slice_2_unique, [-1])
+
+            return tf.cast(t_slice_2_unique, tf.float32), tf.cast(pooled_vals_sorted, tf.float32)
+
+        t_slice_new, p_slice_new = tf.cond(tf.greater(tf.shape(target_x)[0], tf.zeros(shape=(), dtype=tf.int32)),
+                                           do_pool, lambda: (tf.zeros([196], dtype=tf.float32), tf.zeros([196],
+                                                                                                       dtype=tf.float32)))
+
+        p_slice_new = tf.cast(p_slice_new, tf.float32)
+        t_slice_new = tf.cast(t_slice_new, tf.float32)
+
+        return (t_slice_new, p_slice_new)
+
+    target_r_u = tf.reshape(target_r_u, [-1, 5, 196])
+    predicted_r_u = tf.reshape(predicted_r_u, [-1, 56, 56])
+
+    (target_r_u, predicted_r_u) = tf.map_fn(pool_slice, (target_r_u, predicted_r_u), dtype=(tf.float32, tf.float32),
+                                            infer_shape=True)
+
+    target_r_u = tf.cast(target_r_u, tf.float32)
+    predicted_r_u = tf.cast(predicted_r_u, tf.float32)
+
+    loss = smooth_l1_loss(target_r_u, predicted_r_u)
+    loss = K.mean(loss)
+    return loss#tf.constant(0.0)
 
 
-def mrcnn_r_v_loss_graph(predicted_r_v, target_r_v):
+def mrcnn_r_v_loss_graph(predicted_r_v, target_class_ids, target_r_v):
     """L1 regression v loss """
-    # loss = smooth_l1_loss(target_r_v, predicted_r_v)
-    return tf.constant(0.0)
+    # Reshape for simplicity. Merge first two dimensions into one.
+    target_class_ids = K.reshape(target_class_ids, (-1,))
+    target_shape = tf.shape(target_r_v)
+    target_r_v = K.reshape(target_r_v, (-1, target_shape[2], target_shape[3]))
+    pred_shape = tf.shape(predicted_r_v)
+    predicted_r_v = K.reshape(predicted_r_v,
+                              (-1, pred_shape[2], pred_shape[3], pred_shape[4]))
+
+    # Calculate softmax over part dimension (maybe unnecessary)
+    # c_i_shape = tf.shape(predicted_c_i)
+    # c_i = tf.reshape(predicted_c_i, [-1, 25])
+    # c_i = tf.nn.softmax(c_i)
+    # predicted_c_i = tf.reshape(c_i, [-1, c_i_shape[2], c_i_shape[2], 25])
+
+    # Permute predicted masks to [N, num_classes, height, width]
+   # predicted_r_v = tf.transpose(predicted_r_v, [0, 3, 1, 2])
+    predicted_r_v = tf.reshape(predicted_r_v, [-1, pred_shape[3], pred_shape[4]])
+    # Reduce to indeces of max values
+    #predicted_r_v = tf.argmax(predicted_r_v, axis=1)
+
+    # Only positive ROIs contribute to the loss.
+    positive_ix = tf.where(target_class_ids > 0)[:, 0]
+    target_r_v = tf.gather(target_r_v, positive_ix)
+    predicted_r_v = tf.gather(predicted_r_v, positive_ix)
+
+    def pool_slice(x):
+        # Get target and prediction slice
+        t_slice = x[0]
+        p_slice = x[1]
+
+        # Extract ground truth x and y coordinates from target slice
+        target_x = tf.cast(t_slice[0, :], tf.int32)
+        target_y = tf.cast(t_slice[1, :], tf.int32)
+
+        # Remove negative entries
+        target_x = tf.reshape(tf.gather(target_x, tf.where(target_x > -1)), [-1])
+        target_y = tf.reshape(tf.gather(target_y, tf.where(target_y > -1)), [-1])
+
+        def do_pool():
+            sample_pos = tf.fill((pred_shape[2], pred_shape[2]), -1)
+
+            # Format coords and filter out duplicates
+            coords = tf.transpose(tf.stack([target_y, target_x]))
+
+            # Get the unique coordinates and find index of duplicate ones
+            unique_coords, unique_coords_idx = tf_unique_2d(coords)
+
+            # Get ground truth slice gathered by unique coords and without negative entries
+            t_slice_2 = tf.cast(t_slice[4, :], tf.float32)
+            t_slice_2 = tf.reshape(tf.gather(t_slice_2, tf.where(target_x > -1)), [-1])
+            t_slice_2_unique = tf.gather(t_slice_2, unique_coords_idx)
+
+            # Create binary mask of coords
+            binary_mask = tf.sparse_to_dense(unique_coords, tf.shape(sample_pos), 1, validate_indices=False)
+            binary_mask = tf.cast(binary_mask, tf.bool)
+
+            # Analogue mask for point indeces
+            coord_ix = tf.range(tf.shape(unique_coords)[0])
+            binary_mask_idx = tf.sparse_to_dense(unique_coords, tf.shape(sample_pos), coord_ix,
+                                                 default_value=-1, validate_indices=False)
+
+            # Reshape masks
+            binary_mask = tf.reshape(binary_mask, [-1])
+            binary_mask_idx = tf.reshape(binary_mask_idx, [-1])
+
+            # Pool the actual prediction (do the same to the indeces
+            p_slice_flat = tf.reshape(p_slice, [-1])
+            pooled_idx = tf.boolean_mask(binary_mask_idx, binary_mask)
+            pooled_vals = tf.boolean_mask(p_slice_flat, binary_mask)
+
+            # Sort pooled indexes (descending) and reverse: now the pooled values are arranged compatible to the gt
+            pooled_vals_sorted_reversed = tf.gather(pooled_vals, tf.nn.top_k(pooled_idx,
+                                                                             k=tf.shape(pooled_idx)[0]).indices)
+            pooled_vals_sorted = tf.reverse(pooled_vals_sorted_reversed, [-1])
+
+            t = 196 - tf.shape(pooled_vals_sorted)[0]
+            paddings = tf.concat(([[0, 0]], [[0, t]]), axis=0)
+
+            pooled_vals_sorted = tf.reshape(pooled_vals_sorted, [1, -1])
+            pooled_vals_sorted = tf.pad(pooled_vals_sorted, paddings, 'CONSTANT', constant_values=-1)
+            pooled_vals_sorted = tf.reshape(pooled_vals_sorted, [-1])
+
+            t_slice_2_unique = tf.reshape(t_slice_2_unique, [1, -1])
+            t_slice_2_unique = tf.pad(t_slice_2_unique, paddings, 'CONSTANT', constant_values=-1)
+            t_slice_2_unique = tf.reshape(t_slice_2_unique, [-1])
+
+            return tf.cast(t_slice_2_unique, tf.float32), tf.cast(pooled_vals_sorted, tf.float32)
+
+        t_slice_new, p_slice_new = tf.cond(tf.greater(tf.shape(target_x)[0], tf.zeros(shape=(), dtype=tf.int32)),
+                                           do_pool, lambda: (tf.zeros([196], dtype=tf.float32), tf.zeros([196],
+                                                                                                       dtype=tf.float32)))
+
+        p_slice_new = tf.cast(p_slice_new, tf.float32)
+        t_slice_new = tf.cast(t_slice_new, tf.float32)
+
+        return (t_slice_new, p_slice_new)
+
+    target_r_v = tf.reshape(target_r_v, [-1, 5, 196])
+    predicted_r_v = tf.reshape(predicted_r_v, [-1, 56, 56])
+
+    (target_r_v, predicted_r_v) = tf.map_fn(pool_slice, (target_r_v, predicted_r_v), dtype=(tf.float32, tf.float32),
+                                            infer_shape=True)
+
+    target_r_v = tf.cast(target_r_v, tf.float32)
+    predicted_r_v = tf.cast(predicted_r_v, tf.float32)
+
+    loss = smooth_l1_loss(target_r_v, predicted_r_v)
+    loss = K.mean(loss)
+    return loss #tf.constant(0.0)
 
 ############################################################
 #  Data Generator
@@ -1930,8 +2090,6 @@ def coco_data_loader(dataset, config, shuffle=False, augment=False, augmentation
                    random_rois=0, batch_size=1, detection_targets=False,
                    no_augmentation_sources=None):
 
-    print("CoCO Data Loader")
-
     b = 0  # batch item index
     image_index = -1
     image_ids = np.copy(dataset.image_ids)
@@ -2145,8 +2303,6 @@ def data_generator(dataset, config, shuffle=True, augment=False, augmentation=No
     error_count = 0
     no_augmentation_sources = no_augmentation_sources or []
 
-    print("before backbone")
-
     # Anchors
     # [anchor_count, (y1, x1, y2, x2)]
     backbone_shapes = compute_backbone_shapes(config, config.IMAGE_SHAPE)
@@ -2155,10 +2311,9 @@ def data_generator(dataset, config, shuffle=True, augment=False, augmentation=No
                                              backbone_shapes,
                                              config.BACKBONE_STRIDES,
                                              config.RPN_ANCHOR_STRIDE)
-    print("AFTER backbone")
+
     # Keras requires a generator to run indefinitely.
     while True:
-    #for i in range(10):
         try:
             # Increment index to pick next image. Shuffle if at the start of an epoch.
             image_index = (image_index + 1) % len(image_ids)
@@ -2494,16 +2649,11 @@ class MaskRCNN():
                                               config.NUM_CLASSES,
                                               train_bn=config.TRAIN_BN)
 
-            #print(c_i)
-            #print(r_u)
-            #print(r_v)
-            #print(sess.run(c_i.eval()))
-
-            #print(tf.make_ndarray(c_i))
             # TODO: clean up (use tf.identify if necessary)
             output_rois = KL.Lambda(lambda x: x * 1, name="output_rois")(rois)
             c_i_loss = KL.Lambda(lambda rx: mrcnn_c_i_loss_graph(*rx), name="mrcnn_c_i_loss")([c_i, target_class_ids, target_uvs])
-            #print(c_i_loss)
+            r_u_loss = KL.Lambda(lambda x: mrcnn_r_u_loss_graph(*x), name="mrcnn_r_u_loss")([r_u, target_class_ids, target_uvs])
+            r_v_loss = KL.Lambda(lambda x: mrcnn_r_v_loss_graph(*x), name="mrcnn_r_v_loss")([r_v, target_class_ids,target_uvs])
             # Losses
             rpn_class_loss = KL.Lambda(lambda x: rpn_class_loss_graph(*x), name="rpn_class_loss")(
                 [input_rpn_match, rpn_class_logits])
@@ -2515,13 +2665,6 @@ class MaskRCNN():
                 [target_bbox, target_class_ids, mrcnn_bbox])
             mask_loss = KL.Lambda(lambda x: mrcnn_mask_loss_graph(*x), name="mrcnn_mask_loss")(
                 [target_mask, target_class_ids, mrcnn_mask])
-            #print(mask_loss)
-
-
-            # c_i_loss = KL.Lambda(lambda x: mrcnn_c_i_loss_graph(*x), name="mrcnn_c_i_loss")([c_i, target_class_ids, target_uvs])
-            #r_u_loss = KL.Lambda(lambda x: mrcnn_r_u_loss_graph(*x), name="mrcnn_r_u_loss")([r_u, target_uvs])
-            #r_v_loss = KL.Lambda(lambda x: mrcnn_r_v_loss_graph(*x), name="mrcnn_r_v_loss")([r_v, target_uvs])
-
 
             # Model
             inputs = [input_image, input_image_meta,
@@ -2529,10 +2672,10 @@ class MaskRCNN():
             if not config.USE_RPN_ROIS:
                 inputs.append(input_rois)
             outputs = [rpn_class_logits, rpn_class, rpn_bbox,
-                       mrcnn_class_logits, mrcnn_class, mrcnn_bbox, mrcnn_mask, c_i,#, r_u, r_v,
+                       mrcnn_class_logits, mrcnn_class, mrcnn_bbox, mrcnn_mask, c_i, r_u, r_v,
                        rpn_rois, output_rois,
                        rpn_class_loss, rpn_bbox_loss, class_loss, bbox_loss, mask_loss,
-                       c_i_loss]#, r_u_loss, r_v_loss]
+                       c_i_loss, r_u_loss, r_v_loss]
             model = KM.Model(inputs, outputs, name='mask_rcnn')
         else:
             # Network Heads
@@ -2677,7 +2820,8 @@ class MaskRCNN():
         self.keras_model._per_input_losses = {}
         loss_names = [
             "rpn_class_loss",  "rpn_bbox_loss",
-            "mrcnn_class_loss", "mrcnn_bbox_loss", "mrcnn_mask_loss", "mrcnn_c_i_loss"]
+            "mrcnn_class_loss", "mrcnn_bbox_loss", "mrcnn_mask_loss",
+            "mrcnn_c_i_loss", "mrcnn_r_u_loss", "mrcnn_r_v_loss"]
         for name in loss_names:
             layer = self.keras_model.get_layer(name)
             if layer.output in self.keras_model.losses:
@@ -2836,8 +2980,7 @@ class MaskRCNN():
         }
         if layers in layer_regex.keys():
             layers = layer_regex[layers]
-        #print("before")
-        # Data generators
+
         '''
 
         train_generator = data_generator(train_dataset, self.config, shuffle=True,
@@ -2845,10 +2988,9 @@ class MaskRCNN():
                                          batch_size=self.config.BATCH_SIZE,
                                          no_augmentation_sources=no_augmentation_sources)
         '''
-        train_generator = coco_data_loader(val_dataset,self.config)
-        
+        train_generator = coco_data_loader(train_dataset, self.config, shuffle=True, batch_size=self.config.BATCH_SIZE)
 
-        val_generator = data_generator(val_dataset, self.config, shuffle=True,
+        val_generator = coco_data_loader(val_dataset, self.config, shuffle=True,
                                        batch_size=self.config.BATCH_SIZE)
 
         # Create log_dir if it does not exist
@@ -2860,7 +3002,7 @@ class MaskRCNN():
             keras.callbacks.TensorBoard(log_dir="./logs", #self.log_dir,
                                         histogram_freq=0, write_graph=True, write_images=False),
             keras.callbacks.ModelCheckpoint(self.checkpoint_path,
-                                            verbose=0, save_weights_only=True),
+                                            verbose=0, save_weights_only=False),
         ]
 
         # Add custom callbacks to the list
@@ -2883,26 +3025,6 @@ class MaskRCNN():
         else:
             workers = multiprocessing.cpu_count()
 
-        #plot_model(self.keras_model)
-
-        # train_dataset.image
-        #print("----------------")
-        #print(train_generator[0])
-        
-        #print("----------------")
-        #print(train_generator[1])
-
-        #coco_input =   np.asarray(train_generator[0]).reshape(1)
-        #coco_output =  np.asarray(train_generator[1])
-
-
-        ''' Hi Gian-Luca, hier ist Matthieu. ich bearbeite gerade bis etwa 14:30 Uhr deine Datei '''
-
-
-        #print(outputs)
-        
-        #print(coco_output)
-
         '''
         self.keras_model.fit_generator(train_generator,
             initial_epoch=self.epoch,
@@ -2910,9 +3032,7 @@ class MaskRCNN():
             steps_per_epoch=self.config.STEPS_PER_EPOCH)
 
         '''
-        #self.keras_model.fit([coco_input],outputs,verbose=True,epochs=10)
 
-        # self.keras_model.evaluate()
         self.keras_model.fit_generator(
             train_generator,
             initial_epoch=self.epoch,
@@ -2926,7 +3046,6 @@ class MaskRCNN():
             use_multiprocessing=True,
         )
 
-        #self.keras_model.fit(train_dataset)
         self.epoch = max(self.epoch, epochs)
 
     def mold_inputs(self, images):
