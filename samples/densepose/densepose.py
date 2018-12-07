@@ -79,7 +79,7 @@ class DenseposeConfig(Config):
     NUM_CLASSES = 1 + 1   # Background + human
 
     # Number of training steps per epoch
-    STEPS_PER_EPOCH = 1000
+    STEPS_PER_EPOCH = 200
 
     # Skip detections with < 90% confidence
     # DETECTION_MIN_CONFIDENCE = 0.9
@@ -111,7 +111,7 @@ class DenseposeDataset(utils.Dataset):
 
         # All images
         image_ids = list(coco.imgs.keys())
-
+        print("Loaded a total of {} images".format(image_ids.__len__()))
         # Add one additional class for persons
         self.add_class("coco", 1, "person")
 
@@ -230,7 +230,7 @@ class DenseposeDataset(utils.Dataset):
             #print("Stack 1")
             dps = np.stack(instance_dps, axis=2)
             #dp_masks = np.stack(instance_dp_masks, axis=2)
-            #print(dps.shape)
+            #print(dps.shap, dp)
             return dps
         else:
             #print("i")
@@ -376,7 +376,7 @@ class DenseposeDataset(utils.Dataset):
         # dp_masks = []
         # for rle in dp_masks_rles:
         #     dp_masks.append(maskUtils.decode(rle))
-        scaling_factor_for_pooling = 0.21875 # Hardcoded to output mask
+        scaling_factor_for_pooling = 0.1171875 # Hardcoded to output mask
         dp_mask = self.GetDensePoseMask(ann['dp_masks'])
         dp_I = np.array(ann['dp_I'])
         dp_U = np.array(ann['dp_U'])
@@ -427,8 +427,8 @@ def train(model):
 
     model.train(dataset_train, dataset_val,
                 learning_rate=config.LEARNING_RATE,
-                epochs=50,
-                layers='all')
+                epochs=100,
+                layers='heads')
 
 
 # def detect_and_color_splash(model, image_path=None, video_path=None):
@@ -570,7 +570,7 @@ def main(_args):
         # number of classes
         model.load_weights(weights_path, by_name=True, exclude=[
             "mrcnn_class_logits", "mrcnn_bbox_fc",
-            "mrcnn_bbox", "mrcnn_mask", "mrcnn_c_i_1x1", "mrcnn_r_u_1x1", "mrcnn_r_v_1x1"])
+            "mrcnn_bbox", "mrcnn_mask"])
     else:
         model.load_weights(weights_path, by_name=True)
 

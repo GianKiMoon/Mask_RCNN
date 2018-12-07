@@ -577,6 +577,22 @@ def unmold_mask(mask, bbox, image_shape):
     return full_mask
 
 
+def unmold_iuv(c_i, r_u, r_v, bbox, image_shape):
+    y1, x1, y2, x2 = bbox
+    c_i = resize(c_i, (y2 - y1, x2 - x1))
+    r_u = resize(r_u, (y2 - y1, x2 - x1))
+    r_v = resize(r_v, (y2 - y1, x2 - x1))
+
+    full_c_i = np.zeros(image_shape[:2], dtype=np.int32)
+    full_r_u = np.zeros(image_shape[:2], dtype=np.float32)
+    full_r_v = np.zeros(image_shape[:2], dtype=np.float32)
+    full_c_i[y1:y2, x1:x2] = c_i
+    full_r_u[y1:y2, x1:x2] = np.squeeze(r_u)
+    full_r_v[y1:y2, x1:x2] = np.squeeze(r_v)
+
+    return full_c_i, full_r_u, full_r_v
+
+
 ############################################################
 #  Anchors
 ############################################################

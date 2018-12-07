@@ -80,7 +80,7 @@ def apply_mask(image, mask, color, alpha=0.5):
     return image
 
 
-def display_instances(image, boxes, masks, class_ids, class_names,
+def display_instances(image, boxes, masks, c_i, r_u, r_v, class_ids, class_names,
                       scores=None, title="",
                       figsize=(16, 16), ax=None,
                       show_mask=True, show_bbox=True,
@@ -151,6 +151,13 @@ def display_instances(image, boxes, masks, class_ids, class_names,
         mask = masks[:, :, i]
         if show_mask:
             masked_image = apply_mask(masked_image, mask, color)
+
+        print("c i ", c_i)
+        c_i_inst = c_i[:, :, i]
+        c_i_inst = np.where(c_i_inst == 24, np.ones(c_i_inst.shape, dtype=np.bool),
+                            np.zeros(c_i_inst.shape, dtype=np.bool))
+        print("c i inst", c_i_inst)
+        masked_image = apply_mask(masked_image, c_i_inst, (255, 255, 255))
 
         # Mask Polygon
         # Pad to ensure proper polygons for masks that touch image edges.

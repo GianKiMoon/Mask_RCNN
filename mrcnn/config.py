@@ -191,7 +191,10 @@ class Config(object):
         "rpn_bbox_loss": 1.,
         "mrcnn_class_loss": 1.,
         "mrcnn_bbox_loss": 1.,
-        "mrcnn_mask_loss": 1.
+        "mrcnn_mask_loss": 1.,
+        "mrcnn_c_i_loss": 1.,
+        "mrcnn_r_u_loss": 1.,
+        "mrcnn_r_v_loss": 1.
     }
 
     # Use RPN ROIs or externally generated ROIs for training

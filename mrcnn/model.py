@@ -23,6 +23,7 @@ import keras.backend as K
 import keras.layers as KL
 import keras.engine as KE
 import keras.models as KM
+from Cython.Shadow import final
 from keras.utils.vis_utils import plot_model
 
 from mrcnn import utils
@@ -1050,23 +1051,23 @@ def build_fpn_uv_graph(rois, feature_maps, image_meta,
         fcn = KL.Activation('relu')(fcn)
 
     # Part index classification
-    c_i = KL.TimeDistributed(KL.Conv2DTranspose(256, (4, 4), strides=4, activation="relu"),
+    c_i = KL.TimeDistributed(KL.Conv2DTranspose(128, (4, 4), strides=2, activation="relu"), #256, (4, 4), 4
                            name="mrcnn_c_i_deconv")(fcn)
 
     #  1 x 1 Convolution, number of channels respond to k quantized areas of u
     c_i = KL.TimeDistributed(KL.Conv2D(25, (1, 1), strides=1, activation="sigmoid"), name='mrcnn_c_i_1x1')(c_i)
-
+    print("C I Shape: ", c_i.shape)
     # c_i = KL.TimeDistributed(keras.layers.UpSampling2D(size=(2, 2), data_format=None), name="mrcnn_c_i_upsampling")(c_i)
 
     # U regression
-    r_u = KL.TimeDistributed(KL.Conv2DTranspose(256, (4, 4), strides=4, activation="relu"),
+    r_u = KL.TimeDistributed(KL.Conv2DTranspose(128, (4, 4), strides=2, activation="relu"),
                            name="mrcnn_r_u_deconv")(fcn)
 
     #  1 x 1 Convolution, number of channels respond to k quantized areas of u
     r_u = KL.TimeDistributed(KL.Conv2D(1, (1, 1), strides=1, activation="sigmoid"), name='mrcnn_r_u_1x1')(r_u)
 
     # U regression
-    r_v = KL.TimeDistributed(KL.Conv2DTranspose(256, (4, 4), strides=4, activation="relu"),
+    r_v = KL.TimeDistributed(KL.Conv2DTranspose(128, (4, 4), strides=2, activation="relu"),
                              name="mrcnn_r_v_deconv")(fcn)
 
     #  1 x 1 Convolution, number of channels respond to k quantized areas of u
@@ -1250,11 +1251,8 @@ def mrcnn_mask_loss_graph(target_masks, target_class_ids, pred_masks):
 
 
 def tf_unique_2d(x):
-    print("x shape", x.get_shape())
     x_shape = tf.shape(x)  # (3,2)
 
-    print(x_shape[0])
-    print(x_shape[0])
     x1 = tf.tile(x, [1, x_shape[0]])  # [[1,2],[1,2],[1,2],[3,4],[3,4],[3,4]..]
     x2 = tf.tile(x, [x_shape[0], 1])  # [[1,2],[1,2],[1,2],[3,4],[3,4],[3,4]..]
 
@@ -1389,7 +1387,7 @@ def mrcnn_c_i_loss_graph(predicted_c_i, target_class_ids, target_c_i):
         return (t_slice_new, p_slice_new)
 
     target_c_i = tf.reshape(target_c_i, [-1, 5, 196])
-    predicted_c_i = tf.reshape(predicted_c_i, [-1, 56, 56])
+    predicted_c_i = tf.reshape(predicted_c_i, [-1, pred_shape[2], pred_shape[2]])
 
     (target_c_i, predicted_c_i) = tf.map_fn(pool_slice, (target_c_i, predicted_c_i), dtype=(tf.float32, tf.float32),
                                             infer_shape=True)
@@ -1421,9 +1419,9 @@ def mrcnn_r_u_loss_graph(predicted_r_u, target_class_ids, target_r_u):
     #p = tf.Print(predicted_r_u, [tf.shape(predicted_r_u), predicted_r_u], "-", summarize=200)
 
     # Permute predicted masks to [N, num_classes, height, width]
-    predicted_r_u = tf.reshape(predicted_r_u, [-1, pred_shape[3], pred_shape[4]])
+    #predicted_r_u = tf.reshape(p, [-1, pred_shape[3], pred_shape[4]])
     # Reduce to indeces of max values
-    #predicted_r_u = tf.transpose(predicted_r_u, [0, 3, 1, 2])
+    predicted_r_u = tf.transpose(predicted_r_u, [0, 3, 1, 2])
     #predicted_r_u = tf.argmax(predicted_r_u, axis=1)
 
     #p1 = tf.Print(predicted_r_u, [tf.shape(predicted_r_u), predicted_r_u], "--", summarize=200)
@@ -1506,7 +1504,7 @@ def mrcnn_r_u_loss_graph(predicted_r_u, target_class_ids, target_r_u):
         return (t_slice_new, p_slice_new)
 
     target_r_u = tf.reshape(target_r_u, [-1, 5, 196])
-    predicted_r_u = tf.reshape(predicted_r_u, [-1, 56, 56])
+    predicted_r_u = tf.reshape(predicted_r_u, [-1, pred_shape[2], pred_shape[2]])
 
     (target_r_u, predicted_r_u) = tf.map_fn(pool_slice, (target_r_u, predicted_r_u), dtype=(tf.float32, tf.float32),
                                             infer_shape=True)
@@ -1516,7 +1514,7 @@ def mrcnn_r_u_loss_graph(predicted_r_u, target_class_ids, target_r_u):
 
     loss = smooth_l1_loss(target_r_u, predicted_r_u)
     loss = K.mean(loss)
-    return loss#tf.constant(0.0)
+    return loss #tf.constant(0.0)
 
 
 def mrcnn_r_v_loss_graph(predicted_r_v, target_class_ids, target_r_v):
@@ -1535,11 +1533,13 @@ def mrcnn_r_v_loss_graph(predicted_r_v, target_class_ids, target_r_v):
     # c_i = tf.nn.softmax(c_i)
     # predicted_c_i = tf.reshape(c_i, [-1, c_i_shape[2], c_i_shape[2], 25])
 
+
+
     # Permute predicted masks to [N, num_classes, height, width]
-   # predicted_r_v = tf.transpose(predicted_r_v, [0, 3, 1, 2])
-    predicted_r_v = tf.reshape(predicted_r_v, [-1, pred_shape[3], pred_shape[4]])
+    predicted_r_v = tf.transpose(predicted_r_v, [0, 3, 1, 2])
+    #p = tf.Print(predicted_r_v, [tf.shape(predicted_r_v), predicted_r_v], "-", summarize=200)
     # Reduce to indeces of max values
-    #predicted_r_v = tf.argmax(predicted_r_v, axis=1)
+    #predicted_r_v = tf.argmax(p, axis=1)
 
     # Only positive ROIs contribute to the loss.
     positive_ix = tf.where(target_class_ids > 0)[:, 0]
@@ -1619,7 +1619,7 @@ def mrcnn_r_v_loss_graph(predicted_r_v, target_class_ids, target_r_v):
         return (t_slice_new, p_slice_new)
 
     target_r_v = tf.reshape(target_r_v, [-1, 5, 196])
-    predicted_r_v = tf.reshape(predicted_r_v, [-1, 56, 56])
+    predicted_r_v = tf.reshape(predicted_r_v, [-1, pred_shape[2], pred_shape[2]])
 
     (target_r_v, predicted_r_v) = tf.map_fn(pool_slice, (target_r_v, predicted_r_v), dtype=(tf.float32, tf.float32),
                                             infer_shape=True)
@@ -1745,7 +1745,7 @@ def load_image_gt(dataset, config, image_id, augment=False, augmentation=None,
     return image, image_meta, class_ids, bbox, mask, dps
 
 
-def build_detection_targets(rpn_rois, gt_class_ids, gt_boxes, gt_masks, config):
+def build_detection_targets(rpn_rois, gt_class_ids, gt_boxes, gt_masks, gt_uvs, config):
     """Generate targets for training Stage 2 classifier and mask heads.
     This is not used in normal training. It's useful for debugging or to train
     the Mask RCNN heads without using the RPN head.
@@ -1782,6 +1782,7 @@ def build_detection_targets(rpn_rois, gt_class_ids, gt_boxes, gt_masks, config):
     gt_class_ids = gt_class_ids[instance_ids]
     gt_boxes = gt_boxes[instance_ids]
     gt_masks = gt_masks[:, :, instance_ids]
+    gt_uvs = gt_uvs[:, :, instance_ids]
 
     # Compute areas of ROIs and ground truth boxes.tra
     rpn_roi_area = (rpn_rois[:, 2] - rpn_rois[:, 0]) * \
@@ -2843,8 +2844,8 @@ class MaskRCNN():
         self.keras_model.compile(
             optimizer=optimizer,
             loss=[None] * len(self.keras_model.outputs))
-        # self.keras_model.summary()
-        
+        self.keras_model.summary()
+
         # Add metrics for losses
         for name in loss_names:
             if name in self.keras_model.metrics_names:
@@ -3002,7 +3003,7 @@ class MaskRCNN():
             keras.callbacks.TensorBoard(log_dir="./logs", #self.log_dir,
                                         histogram_freq=0, write_graph=True, write_images=False),
             keras.callbacks.ModelCheckpoint(self.checkpoint_path,
-                                            verbose=0, save_weights_only=False),
+                                            verbose=0, save_weights_only=True),
         ]
 
         # Add custom callbacks to the list
@@ -3014,8 +3015,6 @@ class MaskRCNN():
         log("Checkpoint Path: {}".format(self.checkpoint_path))
         self.set_trainable(layers)
         self.compile(learning_rate, self.config.LEARNING_MOMENTUM)
-        
-        #self.keras_model.compile()
 
         # Work-around for Windows: Keras fails on Windows when using
         # multiprocessing workers. See discussion here:
@@ -3087,7 +3086,7 @@ class MaskRCNN():
         windows = np.stack(windows)
         return molded_images, image_metas, windows
 
-    def unmold_detections(self, detections, mrcnn_mask, original_image_shape,
+    def unmold_detections(self, detections, mrcnn_mask, mrcnn_c_i, mrcnn_r_u, mrcnn_r_v, original_image_shape,
                           image_shape, window):
         """Reformats the detections of one image from the format of the neural
         network output to a format suitable for use in the rest of the
@@ -3111,11 +3110,19 @@ class MaskRCNN():
         zero_ix = np.where(detections[:, 4] == 0)[0]
         N = zero_ix[0] if zero_ix.shape[0] > 0 else detections.shape[0]
 
+        # Calculate argmax for part maps
+        c_i = np.argmax(mrcnn_c_i, axis=3)
+
         # Extract boxes, class_ids, scores, and class-specific masks
         boxes = detections[:N, :4]
         class_ids = detections[:N, 4].astype(np.int32)
         scores = detections[:N, 5]
         masks = mrcnn_mask[np.arange(N), :, :, class_ids]
+        c_i = c_i[np.arange(N), :, :]
+        r_u = mrcnn_r_u[np.arange(N), :, :, :]
+        r_v = mrcnn_r_v[np.arange(N), :, :, :]
+
+        print(boxes.shape, class_ids.shape, c_i.shape, r_u.shape, r_v.shape)
 
         # Translate normalized coordinates in the resized image to pixel
         # coordinates in the original image before resizing
@@ -3150,7 +3157,24 @@ class MaskRCNN():
         full_masks = np.stack(full_masks, axis=-1)\
             if full_masks else np.empty(original_image_shape[:2] + (0,))
 
-        return boxes, class_ids, scores, full_masks
+        final_c_i = []
+        final_r_u = []
+        final_r_v = []
+
+        for i in range(N):
+            f_c_i, f_r_u, f_r_v = utils.unmold_iuv(c_i[i], r_u[i], r_v[i], boxes[i], original_image_shape)
+            final_c_i.append(f_c_i)
+            final_r_u.append(f_r_u)
+            final_r_v.append(f_c_i)
+
+        final_c_i = np.stack(final_c_i, axis=-1) \
+            if final_c_i else np.empty(original_image_shape[:2] + (0,))
+        final_r_u = np.stack(final_r_u, axis=-1) \
+            if final_r_u else np.empty(original_image_shape[:2] + (0,))
+        final_r_v = np.stack(final_r_v, axis=-1) \
+            if final_r_v else np.empty(original_image_shape[:2] + (0,))
+
+        return boxes, class_ids, scores, full_masks, final_c_i, final_r_u, final_r_v
 
     def detect(self, images, verbose=0):
         """Runs the detection pipeline.
@@ -3192,14 +3216,15 @@ class MaskRCNN():
             log("molded_images", molded_images)
             log("image_metas", image_metas)
             log("anchors", anchors)
+
         # Run object detection
-        detections, _, _, mrcnn_mask, _, _, _ =\
-            self.keras_model.predict([molded_images, image_metas, anchors], verbose=0)
+        detections, _, _, mrcnn_mask, c_i, r_u, r_v, _, _, _ = self.keras_model.predict([molded_images, image_metas, anchors], batch_size=None, verbose=0)
+
         # Process detections
         results = []
         for i, image in enumerate(images):
-            final_rois, final_class_ids, final_scores, final_masks =\
-                self.unmold_detections(detections[i], mrcnn_mask[i],
+            final_rois, final_class_ids, final_scores, final_masks, final_c_i, final_r_u, final_r_v =\
+                self.unmold_detections(detections[i], mrcnn_mask[i], c_i[i], r_u[i], r_v[i],
                                        image.shape, molded_images[i].shape,
                                        windows[i])
             results.append({
@@ -3207,6 +3232,9 @@ class MaskRCNN():
                 "class_ids": final_class_ids,
                 "scores": final_scores,
                 "masks": final_masks,
+                "c_i": final_c_i,
+                "r_u": final_r_u,
+                "r_v": final_r_v
             })
         return results
 
@@ -3250,7 +3278,7 @@ class MaskRCNN():
             log("image_metas", image_metas)
             log("anchors", anchors)
         # Run object detection
-        detections, _, _, mrcnn_mask, _, _, _ =\
+        detections, _, _, mrcnn_mask, _, _, _, c_i, r_u, r_v =\
             self.keras_model.predict([molded_images, image_metas, anchors], verbose=0)
         # Process detections
         results = []
