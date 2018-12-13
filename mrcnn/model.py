@@ -13,6 +13,7 @@ import datetime
 import re
 import math
 import logging
+from itertools import product
 import sys
 from collections import OrderedDict
 import multiprocessing
@@ -485,7 +486,7 @@ def overlaps_graph(boxes1, boxes2):
     return overlaps
 
 
-def detection_targets_graph(proposals, gt_class_ids, gt_boxes, gt_masks, gt_uvs,
+def detection_targets_graph(proposals, gt_class_ids, gt_boxes, gt_boxes_2, gt_masks, gt_uvs,
                            config):
     """Generates detection targets for one image. Subsamples proposals and
     generates target class IDs, bounding box deltas, and masks for each.
@@ -632,7 +633,7 @@ def detection_targets_graph(proposals, gt_class_ids, gt_boxes, gt_masks, gt_uvs,
     # Some kind of padding needed?
     uvs = tf.pad(uvs, [[0, N + P], (0, 0), (0, 0)])
 
-    return rois, roi_gt_class_ids, deltas, masks, uvs
+    return rois, roi_gt_class_ids, deltas, roi_gt_boxes, masks, uvs
 
 
 class DetectionTargetLayer(KE.Layer):
@@ -674,12 +675,13 @@ class DetectionTargetLayer(KE.Layer):
 
         # Slice the batch and run a graph for each slice
         # TODO: Rename target_bbox to target_deltas for clarity
-        names = ["rois", "target_class_ids", "target_bbox", "target_mask", "target_uv"]
+        names = ["rois", "target_class_ids", "target_bbox", "target_gt_bbox", "target_mask", "target_uv"]
         outputs = utils.batch_slice(
-            [proposals, gt_class_ids, gt_boxes, gt_masks, gt_uvs],
-            lambda v, w, x, y, z: detection_targets_graph(
-                v, w, x, y, z, self.config),
+            [proposals, gt_class_ids, gt_boxes, gt_boxes, gt_masks, gt_uvs],
+            lambda u, v, w, x, y, z: detection_targets_graph(
+                u, v, w, x, y, z, self.config),
             self.config.IMAGES_PER_GPU, names=names)
+
         return outputs
 
     def compute_output_shape(self, input_shape):
@@ -687,13 +689,14 @@ class DetectionTargetLayer(KE.Layer):
             (None, self.config.TRAIN_ROIS_PER_IMAGE, 4),  # rois
             (None, self.config.TRAIN_ROIS_PER_IMAGE),  # class_ids
             (None, self.config.TRAIN_ROIS_PER_IMAGE, 4),  # deltas
+            (None, self.config.TRAIN_ROIS_PER_IMAGE, 4),  # boxes
             (None, self.config.TRAIN_ROIS_PER_IMAGE, self.config.MASK_SHAPE[0],
              self.config.MASK_SHAPE[1]),  # masks
             (None, self.config.TRAIN_ROIS_PER_IMAGE, 5, 196)
         ]
 
     def compute_mask(self, inputs, mask=None):
-        return [None, None, None, None, None]
+        return [None, None, None, None, None, None]
 
 
 ############################################################
@@ -1051,27 +1054,31 @@ def build_fpn_uv_graph(rois, feature_maps, image_meta,
         fcn = KL.Activation('relu')(fcn)
 
     # Part index classification
-    c_i = KL.TimeDistributed(KL.Conv2DTranspose(128, (4, 4), strides=2, activation="relu"), #256, (4, 4), 4
+    c_i = KL.TimeDistributed(KL.Conv2DTranspose(128, (4, 4), strides=4, activation="relu"), #256, (4, 4), 4
                            name="mrcnn_c_i_deconv")(fcn)
 
     #  1 x 1 Convolution, number of channels respond to k quantized areas of u
     c_i = KL.TimeDistributed(KL.Conv2D(25, (1, 1), strides=1, activation="sigmoid"), name='mrcnn_c_i_1x1')(c_i)
-    print("C I Shape: ", c_i.shape)
-    # c_i = KL.TimeDistributed(keras.layers.UpSampling2D(size=(2, 2), data_format=None), name="mrcnn_c_i_upsampling")(c_i)
 
+    c_i = KL.TimeDistributed(keras.layers.UpSampling2D(size=(2, 2), data_format=None), name="mrcnn_c_i_upsampling")(c_i)
+    print("C I Shape: ", c_i.shape)
     # U regression
-    r_u = KL.TimeDistributed(KL.Conv2DTranspose(128, (4, 4), strides=2, activation="relu"),
+    r_u = KL.TimeDistributed(KL.Conv2DTranspose(128, (4, 4), strides=4, activation="relu"),
                            name="mrcnn_r_u_deconv")(fcn)
 
     #  1 x 1 Convolution, number of channels respond to k quantized areas of u
     r_u = KL.TimeDistributed(KL.Conv2D(1, (1, 1), strides=1, activation="sigmoid"), name='mrcnn_r_u_1x1')(r_u)
 
+    r_u = KL.TimeDistributed(keras.layers.UpSampling2D(size=(2, 2), data_format=None), name="mrcnn_r_u_upsampling")(r_u)
+
     # U regression
-    r_v = KL.TimeDistributed(KL.Conv2DTranspose(128, (4, 4), strides=2, activation="relu"),
+    r_v = KL.TimeDistributed(KL.Conv2DTranspose(128, (4, 4), strides=4, activation="relu"),
                              name="mrcnn_r_v_deconv")(fcn)
 
     #  1 x 1 Convolution, number of channels respond to k quantized areas of u
     r_v = KL.TimeDistributed(KL.Conv2D(1, (1, 1), strides=1, activation="sigmoid"), name='mrcnn_r_v_1x1')(r_v)
+
+    r_v = KL.TimeDistributed(keras.layers.UpSampling2D(size=(2, 2), data_format=None), name="mrcnn_r_v_upsampling")(r_v)
 
     return c_i, r_u, r_v
 
@@ -1286,22 +1293,50 @@ def tf_unique_2d(x):
     #sess = tf.Session()
     return (op, r_cond_mul4)
 
-def mrcnn_c_i_loss_graph(predicted_c_i, target_class_ids, target_c_i):
+def w_categorical_crossentropy(y_true, y_pred, weights):
+    nb_cl = len(weights)
+    final_mask = K.zeros_like(y_pred[:, 0])
+    y_pred_max = K.max(y_pred, axis=1)
+    y_pred_max = K.reshape(y_pred_max, (K.shape(y_pred)[0], 1))
+    y_pred_max_mat = K.cast(K.equal(y_pred, y_pred_max), K.floatx())
+    for c_p, c_t in product(range(nb_cl), range(nb_cl)):
+        final_mask += (weights[c_t, c_p] * y_pred_max_mat[:, c_p] * y_true[:, c_t])
+    return K.categorical_crossentropy(y_pred, y_true) * final_mask
+
+
+def box_format(delta_box, gt_box):
+    gt_height = gt_box[2] - gt_box[0]
+    gt_width = gt_box[3] - gt_box[1]
+    gt_center_y = gt_box[0] + 0.5 * gt_height
+    gt_center_x = gt_box[1] + 0.5 * gt_width
+
+    height = tf.exp(delta_box[2]) / gt_height
+    width = tf.exp(delta_box[3]) / gt_width
+    center_y = ((delta_box[0] * height) - gt_center_y) * -1
+    center_x = ((delta_box[1] * width) - gt_center_x) * -1
+
+    y1 = (center_y - 0.5 * height)
+    x1 = (center_x - 0.5 * width)
+    y2 = height + y1
+    x2 = width + x1
+
+    return y1, x1, y2, x2
+
+
+def mrcnn_c_i_loss_graph(predicted_c_i, predicted_bbox, target_class_ids,
+                         target_c_i, target_bbox):
     """Softmax cross entropy quantized u loss """
 
+    print(predicted_bbox.shape)
+
     # Reshape for simplicity. Merge first two dimensions into one.
+    target_bbox = K.reshape(target_bbox, (-1, 4))
     target_class_ids = K.reshape(target_class_ids, (-1,))
     target_shape = tf.shape(target_c_i)
     target_c_i = K.reshape(target_c_i, (-1, target_shape[2], target_shape[3]))
     pred_shape = tf.shape(predicted_c_i)
     predicted_c_i = K.reshape(predicted_c_i,
                            (-1, pred_shape[2], pred_shape[3], pred_shape[4]))
-
-    # Calculate softmax over part dimension (maybe unnecessary)
-    #c_i_shape = tf.shape(predicted_c_i)
-    #c_i = tf.reshape(predicted_c_i, [-1, 25])
-    #c_i = tf.nn.softmax(c_i)
-    #predicted_c_i = tf.reshape(c_i, [-1, c_i_shape[2], c_i_shape[2], 25])
 
     # Permute predicted masks to [N, num_classes, height, width]
     predicted_c_i = tf.transpose(predicted_c_i, [0, 3, 1, 2])
@@ -1312,11 +1347,13 @@ def mrcnn_c_i_loss_graph(predicted_c_i, target_class_ids, target_c_i):
     positive_ix = tf.where(target_class_ids > 0)[:, 0]
     target_c_i = tf.gather(target_c_i, positive_ix)
     predicted_c_i = tf.gather(predicted_c_i, positive_ix)
+    target_bbox = tf.gather(target_bbox, positive_ix)
 
     def pool_slice(x):
         # Get target and prediction slice
         t_slice = x[0]
         p_slice = x[1]
+        b_slice = x[2]
 
         # Extract ground truth x and y coordinates from target slice
         target_x = tf.cast(t_slice[0, :], tf.int32)
@@ -1326,19 +1363,62 @@ def mrcnn_c_i_loss_graph(predicted_c_i, target_class_ids, target_c_i):
         target_x = tf.reshape(tf.gather(target_x, tf.where(target_x > -1)), [-1])
         target_y = tf.reshape(tf.gather(target_y, tf.where(target_y > -1)), [-1])
 
+        print("b slice ", b_slice.shape)
+        x1_source = tf.cast(b_slice[1], tf.float32)
+        x2_source = tf.cast(b_slice[3], tf.float32)
+
+        y1_source = tf.cast(b_slice[0], tf.float32)
+        y2_source = tf.cast(b_slice[2], tf.float32)
+
+        y1, x1, y2, x2 = box_format(predicted_bbox, target_bbox)
+
+        M = pred_shape[3]
+
+        y1 = tf.cast(y1, tf.float32)
+        x1 = tf.cast(x1, tf.float32)
+        y2 = tf.cast(y2, tf.float32)
+        x2 = tf.cast(x2, tf.float32)
+        M = tf.cast(M, tf.float32)
+
+        gt_length_x = x2_source - x1_source
+        gt_length_y = y2_source - y1_source
+
+        target_x = tf.cast(target_x, tf.float32)
+        target_y = tf.cast(target_y, tf.float32)
+
+        target_y = ((target_y / tf.constant(256.) * tf.cast(gt_length_y, tf.float32)) + tf.cast(y1_source, tf.float32) - tf.cast(y1, tf.float32)) * (M / (y2 - y1))
+        target_x = ((target_x / 256. * gt_length_x) + x1_source - x1) * (M / (x2 - x1))
+
         def do_pool():
             sample_pos = tf.fill((pred_shape[2], pred_shape[2]), -1)
 
+            GT_I = tf.cast(t_slice[2, :], tf.int32)
+
+            wy1 = tf.where(target_y < 0)
+            GT_I[wy1] = 0
+            wy2 = tf.where(target_y > (M - 1))
+            GT_I[wy2] = 0
+            wx1 = tf.where(target_x < 0)
+            GT_I[wx1] = 0
+            wx2 = tf.where(target_x > (M - 1))
+            GT_I[wx2] = 0
+            #
+            points_inside = tf.where(GT_I > 0)
+            t_x = tf.gather(target_x, points_inside)
+            t_y = tf.gather(target_y, points_inside)
+            t_slice_2 = tf.gather(GT_I, points_inside)
+
             # Format coords and filter out duplicates
-            coords = tf.transpose(tf.stack([target_y, target_x]))
+            coords = tf.transpose(tf.stack([t_y, t_x]))
 
             # Get the unique coordinates and find index of duplicate ones
             unique_coords, unique_coords_idx = tf_unique_2d(coords)
 
             # Get ground truth slice gathered by unique coords and without negative entries
-            t_slice_2 = tf.cast(t_slice[2, :], tf.int32)
+
             t_slice_2 = tf.reshape(tf.gather(t_slice_2, tf.where(target_x > -1)), [-1])
             t_slice_2_unique = tf.gather(t_slice_2, unique_coords_idx)
+
 
             # Create binary mask of coords
             max_coord = tf.reduce_max(unique_coords)
@@ -1389,7 +1469,7 @@ def mrcnn_c_i_loss_graph(predicted_c_i, target_class_ids, target_c_i):
     target_c_i = tf.reshape(target_c_i, [-1, 5, 196])
     predicted_c_i = tf.reshape(predicted_c_i, [-1, pred_shape[2], pred_shape[2]])
 
-    (target_c_i, predicted_c_i) = tf.map_fn(pool_slice, (target_c_i, predicted_c_i), dtype=(tf.float32, tf.float32),
+    (target_c_i, predicted_c_i) = tf.map_fn(pool_slice, (target_c_i, predicted_c_i, target_bbox), dtype=(tf.float32, tf.float32),
                                             infer_shape=True)
 
     target_c_i = tf.cast(target_c_i, tf.int32)
@@ -2623,7 +2703,7 @@ class MaskRCNN():
             # Subsamples proposals and generates target outputs for training
             # Note that proposal class IDs, gt_boxes, and gt_masks are zero
             # padded. Equally, returned rois and targets are zero padded.
-            rois, target_class_ids, target_bbox, target_mask, target_uvs=\
+            rois, target_class_ids, target_bbox, target_gt_bbox, target_mask, target_uvs =\
                 DetectionTargetLayer(config, name="proposal_targets")([
                     target_rois, input_gt_class_ids, gt_boxes, input_gt_masks, input_gt_uvs])#, input_gt_i, input_gt_u, input_gt_v])
 
@@ -2651,10 +2731,14 @@ class MaskRCNN():
                                               train_bn=config.TRAIN_BN)
 
             # TODO: clean up (use tf.identify if necessary)
+
             output_rois = KL.Lambda(lambda x: x * 1, name="output_rois")(rois)
-            c_i_loss = KL.Lambda(lambda rx: mrcnn_c_i_loss_graph(*rx), name="mrcnn_c_i_loss")([c_i, target_class_ids, target_uvs])
-            r_u_loss = KL.Lambda(lambda x: mrcnn_r_u_loss_graph(*x), name="mrcnn_r_u_loss")([r_u, target_class_ids, target_uvs])
-            r_v_loss = KL.Lambda(lambda x: mrcnn_r_v_loss_graph(*x), name="mrcnn_r_v_loss")([r_v, target_class_ids,target_uvs])
+            c_i_loss = KL.Lambda(lambda rx: mrcnn_c_i_loss_graph(*rx),
+                                 name="mrcnn_c_i_loss")([c_i, mrcnn_bbox, target_class_ids, target_uvs, target_gt_bbox])
+            r_u_loss = KL.Lambda(lambda x: mrcnn_r_u_loss_graph(*x),
+                                 name="mrcnn_r_u_loss")([r_u, target_class_ids, target_uvs])
+            r_v_loss = KL.Lambda(lambda x: mrcnn_r_v_loss_graph(*x),
+                                 name="mrcnn_r_v_loss")([r_v, target_class_ids, target_uvs])
             # Losses
             rpn_class_loss = KL.Lambda(lambda x: rpn_class_loss_graph(*x), name="rpn_class_loss")(
                 [input_rpn_match, rpn_class_logits])

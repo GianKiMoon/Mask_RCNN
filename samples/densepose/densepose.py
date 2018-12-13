@@ -376,7 +376,7 @@ class DenseposeDataset(utils.Dataset):
         # dp_masks = []
         # for rle in dp_masks_rles:
         #     dp_masks.append(maskUtils.decode(rle))
-        scaling_factor_for_pooling = 0.1171875 # Hardcoded to output mask
+        scaling_factor_for_pooling = 0.4375 #0.234375 #30:  0.1171875 # Hardcoded to output mask
         dp_mask = self.GetDensePoseMask(ann['dp_masks'])
         dp_I = np.array(ann['dp_I'])
         dp_U = np.array(ann['dp_U'])

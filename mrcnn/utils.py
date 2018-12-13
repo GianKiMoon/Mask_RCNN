@@ -579,7 +579,8 @@ def unmold_mask(mask, bbox, image_shape):
 
 def unmold_iuv(c_i, r_u, r_v, bbox, image_shape):
     y1, x1, y2, x2 = bbox
-    c_i = resize(c_i, (y2 - y1, x2 - x1))
+    c_i = resize(c_i, (y2 - y1, x2 - x1), preserve_range=True, order=0)
+    c_i = np.round(c_i)
     r_u = resize(r_u, (y2 - y1, x2 - x1))
     r_v = resize(r_v, (y2 - y1, x2 - x1))
 

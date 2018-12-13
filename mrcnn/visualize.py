@@ -84,7 +84,7 @@ def display_instances(image, boxes, masks, c_i, r_u, r_v, class_ids, class_names
                       scores=None, title="",
                       figsize=(16, 16), ax=None,
                       show_mask=True, show_bbox=True,
-                      colors=None, captions=None):
+                      colors=None, captions=None, part_ind=0):
     """
     boxes: [num_instance, (y1, x1, y2, x2, class_id)] in image coordinates.
     masks: [height, width, num_instances]
@@ -147,17 +147,23 @@ def display_instances(image, boxes, masks, c_i, r_u, r_v, class_ids, class_names
         ax.text(x1, y1 + 8, caption,
                 color='w', size=11, backgroundcolor="none")
 
+        show_mask = False
+
         # Mask
         mask = masks[:, :, i]
         if show_mask:
             masked_image = apply_mask(masked_image, mask, color)
 
-        print("c i ", c_i)
+        cl = random_colors(25)
         c_i_inst = c_i[:, :, i]
-        c_i_inst = np.where(c_i_inst == 24, np.ones(c_i_inst.shape, dtype=np.bool),
-                            np.zeros(c_i_inst.shape, dtype=np.bool))
-        print("c i inst", c_i_inst)
-        masked_image = apply_mask(masked_image, c_i_inst, (255, 255, 255))
+        # for j in range(20, 24):
+        #     c_i_inst_cl = np.where(c_i_inst == j+1, np.ones(c_i_inst.shape, dtype=np.bool),
+        #                         np.zeros(c_i_inst.shape, dtype=np.bool))
+        #     masked_image = apply_mask(masked_image, c_i_inst_cl, cl[j])
+
+        c_i_inst_cl = np.where(c_i_inst == part_ind, np.ones(c_i_inst.shape, dtype=np.bool),
+                               np.zeros(c_i_inst.shape, dtype=np.bool))
+        masked_image = apply_mask(masked_image, c_i_inst_cl, cl[0])
 
         # Mask Polygon
         # Pad to ensure proper polygons for masks that touch image edges.
