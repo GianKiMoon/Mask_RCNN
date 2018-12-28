@@ -17,6 +17,9 @@ from itertools import product
 import sys
 from collections import OrderedDict
 import multiprocessing
+from operator import pos
+from tensorflow.python import debug as tf_debug
+
 import numpy as np
 import tensorflow as tf
 import keras
@@ -1054,31 +1057,31 @@ def build_fpn_uv_graph(rois, feature_maps, image_meta,
         fcn = KL.Activation('relu')(fcn)
 
     # Part index classification
-    c_i = KL.TimeDistributed(KL.Conv2DTranspose(128, (4, 4), strides=4, activation="relu"), #256, (4, 4), 4
+    c_i = KL.TimeDistributed(KL.Conv2DTranspose(256, (4, 4), strides=4, activation="relu"), #256, (4, 4), 4
                            name="mrcnn_c_i_deconv")(fcn)
 
     #  1 x 1 Convolution, number of channels respond to k quantized areas of u
     c_i = KL.TimeDistributed(KL.Conv2D(25, (1, 1), strides=1, activation="sigmoid"), name='mrcnn_c_i_1x1')(c_i)
 
-    c_i = KL.TimeDistributed(keras.layers.UpSampling2D(size=(2, 2), data_format=None), name="mrcnn_c_i_upsampling")(c_i)
+    #c_i = KL.TimeDistributed(keras.layers.UpSampling2D(size=(2, 2), data_format=None), name="mrcnn_c_i_upsampling")(c_i)
     print("C I Shape: ", c_i.shape)
     # U regression
-    r_u = KL.TimeDistributed(KL.Conv2DTranspose(128, (4, 4), strides=4, activation="relu"),
+    r_u = KL.TimeDistributed(KL.Conv2DTranspose(256, (4, 4), strides=4, activation="relu"),
                            name="mrcnn_r_u_deconv")(fcn)
 
     #  1 x 1 Convolution, number of channels respond to k quantized areas of u
     r_u = KL.TimeDistributed(KL.Conv2D(1, (1, 1), strides=1, activation="sigmoid"), name='mrcnn_r_u_1x1')(r_u)
 
-    r_u = KL.TimeDistributed(keras.layers.UpSampling2D(size=(2, 2), data_format=None), name="mrcnn_r_u_upsampling")(r_u)
+    #r_u = KL.TimeDistributed(keras.layers.UpSampling2D(size=(2, 2), data_format=None), name="mrcnn_r_u_upsampling")(r_u)
 
     # U regression
-    r_v = KL.TimeDistributed(KL.Conv2DTranspose(128, (4, 4), strides=4, activation="relu"),
+    r_v = KL.TimeDistributed(KL.Conv2DTranspose(256, (4, 4), strides=4, activation="relu"),
                              name="mrcnn_r_v_deconv")(fcn)
 
     #  1 x 1 Convolution, number of channels respond to k quantized areas of u
     r_v = KL.TimeDistributed(KL.Conv2D(1, (1, 1), strides=1, activation="sigmoid"), name='mrcnn_r_v_1x1')(r_v)
 
-    r_v = KL.TimeDistributed(keras.layers.UpSampling2D(size=(2, 2), data_format=None), name="mrcnn_r_v_upsampling")(r_v)
+    #r_v = KL.TimeDistributed(keras.layers.UpSampling2D(size=(2, 2), data_format=None), name="mrcnn_r_v_upsampling")(r_v)
 
     return c_i, r_u, r_v
 
@@ -1305,36 +1308,38 @@ def w_categorical_crossentropy(y_true, y_pred, weights):
 
 
 def box_format(delta_box, gt_box):
-    gt_height = gt_box[2] - gt_box[0]
-    gt_width = gt_box[3] - gt_box[1]
-    gt_center_y = gt_box[0] + 0.5 * gt_height
-    gt_center_x = gt_box[1] + 0.5 * gt_width
 
-    height = tf.exp(delta_box[2]) / gt_height
-    width = tf.exp(delta_box[3]) / gt_width
-    center_y = ((delta_box[0] * height) - gt_center_y) * -1
-    center_x = ((delta_box[1] * width) - gt_center_x) * -1
+    height = gt_box[2] - gt_box[0]
+    width = gt_box[3] - gt_box[1]
+    center_y = gt_box[0] + 0.5 * height
+    center_x = gt_box[1] + 0.5 * width
 
-    y1 = (center_y - 0.5 * height)
-    x1 = (center_x - 0.5 * width)
-    y2 = height + y1
-    x2 = width + x1
+    center_y += delta_box[0] * height
+    center_x += delta_box[1] * width
+    height *= tf.exp(delta_box[2])
+    width *= tf.exp(delta_box[3])
+
+    y1 = tf.clip_by_value((center_y - 0.5 * height), 0., 1.)
+    x1 = tf.clip_by_value((center_x - 0.5 * width), 0., 1.)
+    y2 = tf.clip_by_value((y1 + height), 0., 1.)
+    x2 = tf.clip_by_value((x1 + width), 0., 1.)
 
     return y1, x1, y2, x2
 
 
-def mrcnn_c_i_loss_graph(predicted_c_i, predicted_bbox, target_class_ids,
+def mrcnn_c_i_loss_graph(predicted_c_i, predicted_bbox, output_rois, target_class_ids,
                          target_c_i, target_bbox):
     """Softmax cross entropy quantized u loss """
-
-    print(predicted_bbox.shape)
-
+    print("oR", output_rois)
     # Reshape for simplicity. Merge first two dimensions into one.
-    target_bbox = K.reshape(target_bbox, (-1, 4))
-    target_class_ids = K.reshape(target_class_ids, (-1,))
     target_shape = tf.shape(target_c_i)
-    target_c_i = K.reshape(target_c_i, (-1, target_shape[2], target_shape[3]))
     pred_shape = tf.shape(predicted_c_i)
+
+    target_bbox = K.reshape(target_bbox, (-1, 4))
+    predicted_bbox = K.reshape(predicted_bbox, (-1, K.int_shape(predicted_bbox)[2], 4))
+    output_rois = K.reshape(output_rois, (-1, 4))
+    target_class_ids = K.reshape(target_class_ids, (-1,))
+    target_c_i = K.reshape(target_c_i, (-1, target_shape[2], target_shape[3]))
     predicted_c_i = K.reshape(predicted_c_i,
                            (-1, pred_shape[2], pred_shape[3], pred_shape[4]))
 
@@ -1345,15 +1350,23 @@ def mrcnn_c_i_loss_graph(predicted_c_i, predicted_bbox, target_class_ids,
 
     # Only positive ROIs contribute to the loss.
     positive_ix = tf.where(target_class_ids > 0)[:, 0]
+    positive_roi_class_ids = tf.cast(
+        tf.gather(target_class_ids, positive_ix), tf.int64)
+    indices = tf.stack([positive_ix, positive_roi_class_ids], axis=1)
+
     target_c_i = tf.gather(target_c_i, positive_ix)
     predicted_c_i = tf.gather(predicted_c_i, positive_ix)
     target_bbox = tf.gather(target_bbox, positive_ix)
+    output_rois = tf.gather(output_rois, positive_ix)
+    predicted_bbox = tf.gather_nd(predicted_bbox, indices)
 
     def pool_slice(x):
         # Get target and prediction slice
         t_slice = x[0]
         p_slice = x[1]
-        b_slice = x[2]
+        bbox_t_slice = x[2]
+        bbox_p_slice = x[3]
+        r_slice = x[4]
 
         # Extract ground truth x and y coordinates from target slice
         target_x = tf.cast(t_slice[0, :], tf.int32)
@@ -1363,14 +1376,16 @@ def mrcnn_c_i_loss_graph(predicted_c_i, predicted_bbox, target_class_ids,
         target_x = tf.reshape(tf.gather(target_x, tf.where(target_x > -1)), [-1])
         target_y = tf.reshape(tf.gather(target_y, tf.where(target_y > -1)), [-1])
 
-        print("b slice ", b_slice.shape)
-        x1_source = tf.cast(b_slice[1], tf.float32)
-        x2_source = tf.cast(b_slice[3], tf.float32)
+        print("b slice ", bbox_t_slice.shape)
+        x1_source = tf.cast(bbox_t_slice[1], tf.float32)
+        x2_source = tf.cast(bbox_t_slice[3], tf.float32)
 
-        y1_source = tf.cast(b_slice[0], tf.float32)
-        y2_source = tf.cast(b_slice[2], tf.float32)
+        y1_source = tf.cast(bbox_t_slice[0], tf.float32)
+        y2_source = tf.cast(bbox_t_slice[2], tf.float32)
 
-        y1, x1, y2, x2 = box_format(predicted_bbox, target_bbox)
+        y1, x1, y2, x2 = box_format(bbox_p_slice, r_slice)
+
+        #p = tf.Print(y1, [y1_source, x1_source, y2_source, x2_source, y1, x1, y2, x2])
 
         M = pred_shape[3]
 
@@ -1385,38 +1400,48 @@ def mrcnn_c_i_loss_graph(predicted_c_i, predicted_bbox, target_class_ids,
 
         target_x = tf.cast(target_x, tf.float32)
         target_y = tf.cast(target_y, tf.float32)
+        print("T_y", target_y)
 
-        target_y = ((target_y / tf.constant(256.) * tf.cast(gt_length_y, tf.float32)) + tf.cast(y1_source, tf.float32) - tf.cast(y1, tf.float32)) * (M / (y2 - y1))
+        target_y = ((target_y / 256. * gt_length_y) + y1_source - y1) * (M / (y2 - y1)) #tf.scalar_mul((M / (y2 - y1)), (tf.scalar_mul(gt_length_y, tf.truediv(target_y, 256.)) + y1_source - y1))
         target_x = ((target_x / 256. * gt_length_x) + x1_source - x1) * (M / (x2 - x1))
 
+
+
         def do_pool():
+            print("T_y", target_y)
             sample_pos = tf.fill((pred_shape[2], pred_shape[2]), -1)
 
             GT_I = tf.cast(t_slice[2, :], tf.int32)
+            GT_I = tf.reshape(tf.gather(GT_I, tf.where(GT_I > -1)), [-1])
 
-            wy1 = tf.where(target_y < 0)
-            GT_I[wy1] = 0
-            wy2 = tf.where(target_y > (M - 1))
-            GT_I[wy2] = 0
-            wx1 = tf.where(target_x < 0)
-            GT_I[wx1] = 0
-            wx2 = tf.where(target_x > (M - 1))
-            GT_I[wx2] = 0
+
+            zeros = tf.zeros_like(GT_I)
+
+            GT_I = tf.where(target_y < 0, zeros, GT_I)
+            GT_I = tf.where(target_y > (M - 1), zeros, GT_I)
+            GT_I = tf.where(target_x < 0, zeros, GT_I)
+            GT_I = tf.where(target_x > (M - 1), zeros, GT_I)
             #
             points_inside = tf.where(GT_I > 0)
+            print("points inside", points_inside)
             t_x = tf.gather(target_x, points_inside)
+            print("t_x ", t_x)
             t_y = tf.gather(target_y, points_inside)
             t_slice_2 = tf.gather(GT_I, points_inside)
 
+            t_x = tf.cast(tf.reshape(t_x, [-1]), tf.int32)
+            t_y = tf.cast(tf.reshape(t_y, [-1]), tf.int32)
+
             # Format coords and filter out duplicates
             coords = tf.transpose(tf.stack([t_y, t_x]))
+            print("coords ", coords)
 
             # Get the unique coordinates and find index of duplicate ones
             unique_coords, unique_coords_idx = tf_unique_2d(coords)
 
             # Get ground truth slice gathered by unique coords and without negative entries
 
-            t_slice_2 = tf.reshape(tf.gather(t_slice_2, tf.where(target_x > -1)), [-1])
+            #t_slice_2 = tf.reshape(tf.gather(t_slice_2, tf.where(target_x > -1)), [-1])
             t_slice_2_unique = tf.gather(t_slice_2, unique_coords_idx)
 
 
@@ -1460,7 +1485,8 @@ def mrcnn_c_i_loss_graph(predicted_c_i, predicted_bbox, target_class_ids,
         t_slice_new, p_slice_new = tf.cond(tf.greater(tf.shape(target_x)[0], tf.zeros(shape=(), dtype=tf.int32)),
                                            do_pool, lambda: (tf.zeros([196], dtype=tf.int32), tf.zeros([196],
                                                                                                        dtype=tf.int32)))
-
+        p_slice_new = tf.reshape(p_slice_new, [1, 196])
+        t_slice_new = tf.reshape(t_slice_new, [1, 196])
         p_slice_new = tf.cast(p_slice_new, tf.float32)
         t_slice_new = tf.cast(t_slice_new, tf.float32)
 
@@ -1469,7 +1495,7 @@ def mrcnn_c_i_loss_graph(predicted_c_i, predicted_bbox, target_class_ids,
     target_c_i = tf.reshape(target_c_i, [-1, 5, 196])
     predicted_c_i = tf.reshape(predicted_c_i, [-1, pred_shape[2], pred_shape[2]])
 
-    (target_c_i, predicted_c_i) = tf.map_fn(pool_slice, (target_c_i, predicted_c_i, target_bbox), dtype=(tf.float32, tf.float32),
+    (target_c_i, predicted_c_i) = tf.map_fn(pool_slice, (target_c_i, predicted_c_i, target_bbox, predicted_bbox, output_rois), dtype=(tf.float32, tf.float32),
                                             infer_shape=True)
 
     target_c_i = tf.cast(target_c_i, tf.int32)
@@ -1594,7 +1620,7 @@ def mrcnn_r_u_loss_graph(predicted_r_u, target_class_ids, target_r_u):
 
     loss = smooth_l1_loss(target_r_u, predicted_r_u)
     loss = K.mean(loss)
-    return loss #tf.constant(0.0)
+    return tf.constant(0.0)
 
 
 def mrcnn_r_v_loss_graph(predicted_r_v, target_class_ids, target_r_v):
@@ -1709,7 +1735,8 @@ def mrcnn_r_v_loss_graph(predicted_r_v, target_class_ids, target_r_v):
 
     loss = smooth_l1_loss(target_r_v, predicted_r_v)
     loss = K.mean(loss)
-    return loss #tf.constant(0.0)
+    return tf.constant(0.0)
+
 
 ############################################################
 #  Data Generator
@@ -2731,10 +2758,12 @@ class MaskRCNN():
                                               train_bn=config.TRAIN_BN)
 
             # TODO: clean up (use tf.identify if necessary)
-
+            print("Rois ", rois)
             output_rois = KL.Lambda(lambda x: x * 1, name="output_rois")(rois)
+            print("Output Rois ", output_rois)
+
             c_i_loss = KL.Lambda(lambda rx: mrcnn_c_i_loss_graph(*rx),
-                                 name="mrcnn_c_i_loss")([c_i, mrcnn_bbox, target_class_ids, target_uvs, target_gt_bbox])
+                                 name="mrcnn_c_i_loss")([c_i, mrcnn_bbox, output_rois, target_class_ids, target_uvs, target_gt_bbox])
             r_u_loss = KL.Lambda(lambda x: mrcnn_r_u_loss_graph(*x),
                                  name="mrcnn_r_u_loss")([r_u, target_class_ids, target_uvs])
             r_v_loss = KL.Lambda(lambda x: mrcnn_r_v_loss_graph(*x),
@@ -2924,6 +2953,11 @@ class MaskRCNN():
             if 'gamma' not in w.name and 'beta' not in w.name]
         self.keras_model.add_loss(tf.add_n(reg_losses))
 
+        sess = K.get_session()
+        #sess = tf_debug.TensorBoardDebugWrapperSession(tf.Session(),"ntw-424:12345")# LocalCLIDebugWrapperSession(sess)
+        sess = tf_debug.LocalCLIDebugWrapperSession(sess)
+        K.set_session(sess)
+
         # Compile
         self.keras_model.compile(
             optimizer=optimizer,
@@ -3073,7 +3107,7 @@ class MaskRCNN():
                                          batch_size=self.config.BATCH_SIZE,
                                          no_augmentation_sources=no_augmentation_sources)
         '''
-        train_generator = coco_data_loader(train_dataset, self.config, shuffle=True, batch_size=self.config.BATCH_SIZE)
+        train_generator = coco_data_loader(train_dataset, self.config, shuffle=True, batch_size=self.config.BATCH_SIZE) # todo change back
 
         val_generator = coco_data_loader(val_dataset, self.config, shuffle=True,
                                        batch_size=self.config.BATCH_SIZE)
@@ -3084,7 +3118,7 @@ class MaskRCNN():
 
         # Callbacks
         callbacks = [
-            keras.callbacks.TensorBoard(log_dir="./logs", #self.log_dir,
+            keras.callbacks.TensorBoard(log_dir=self.log_dir, #"./logs",
                                         histogram_freq=0, write_graph=True, write_images=False),
             keras.callbacks.ModelCheckpoint(self.checkpoint_path,
                                             verbose=0, save_weights_only=True),

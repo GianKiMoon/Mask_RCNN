@@ -79,10 +79,10 @@ class DenseposeConfig(Config):
     NUM_CLASSES = 1 + 1   # Background + human
 
     # Number of training steps per epoch
-    STEPS_PER_EPOCH = 200
+    STEPS_PER_EPOCH = 1000
 
     # Skip detections with < 90% confidence
-    # DETECTION_MIN_CONFIDENCE = 0.9
+    DETECTION_MIN_CONFIDENCE = 0.9
 
 
 ############################################################
@@ -423,7 +423,7 @@ def train(model):
     # Since we're using a very small dataset, and starting from
     # COCO trained weights, we don't need to train too long. Also,
     # no need to train all layers, just the heads should do it.
-    print("Training all layers")
+    print("Training head layers")
 
     model.train(dataset_train, dataset_val,
                 learning_rate=config.LEARNING_RATE,

@@ -120,7 +120,7 @@ def display_instances(image, boxes, masks, c_i, r_u, r_v, class_ids, class_names
     ax.axis('off')
     ax.set_title(title)
 
-    masked_image = image.astype(np.uint32).copy()
+    masked_image = np.zeros_like(image.astype(np.uint32).copy())
     for i in range(N):
         color = colors[i]
 
