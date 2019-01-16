@@ -25,12 +25,16 @@ print("tensorflow version {}".format(tf.__version__))
 dataset_path = "../datasets/coco"
 
 model = modellib.FCN8(nClasses=15,
-             input_height=256,
-             input_width=256)
+              input_height=256,
+              input_width=256)
+#model = modellib.UNET(nClasses=15,
+#             input_height=256,
+#             input_width=256)
 model.summary()
 
 
-optimizer = optimizers.SGD(lr=0.01, decay=5**(-4), momentum=0.9, nesterov=True)
+#optimizer = optimizers.Adam(lr=0.001)#SGD(lr=0.002, decay=5**(-4), momentum=0.9, nesterov=True)
+optimizer = optimizers.Adam(lr=0.001)
 model.compile(loss='categorical_crossentropy',
               optimizer=optimizer,
               metrics=['accuracy'])
@@ -38,24 +42,31 @@ model.compile(loss='categorical_crossentropy',
 #X_train, y_train, X_test, y_test = util.load_data_and_split(dataset_path, subset="train", samples=2)
 
 if 1:
-    coco, image_dir = util.load_densepose_coco(dataset_path, subset="train")
+    coco, image_dir, num_anns = util.load_densepose_coco(dataset_path, subset="train")
     image_ids = list(coco.imgs.keys())
 
     split = 0.8
     size = image_ids.__len__()
+
     train_image_ids = image_ids[0:int(size * split)]
-    print("# train images: ", train_image_ids.__len__())
-    test_image_ids = image_ids[int(size * split):-1]
-    print("# test images: ", test_image_ids.__len__())
+    train_num_anns, train_instance_ids = util.count_anns(coco, train_image_ids)
+    print(train_instance_ids)
+    print("# train image anns: ", train_num_anns)
+
+    val_image_ids = image_ids[int(size * split):-1]
+    val_num_anns, val_instance_ids = util.count_anns(coco, val_image_ids)
+    print("# val image anns: ", val_num_anns)
 
     params = {'dim': (64, 64),
               'batch_size': 16,
               'n_classes': 15,
-              'n_channels': 3,
+              'n_channels': 4,
               'shuffle': True}
 
-    training_generator = util.DataGenerator(train_image_ids, coco, image_dir, **params)
-    validation_generator = util.DataGenerator(test_image_ids, coco, image_dir, **params)
+    training_generator = util.DataGenerator(train_instance_ids, coco, image_dir, train_num_anns,
+                                            **params)
+    validation_generator = util.DataGenerator(val_instance_ids, coco, image_dir, val_num_anns,
+                                              **params)
 
 # Directory for training logs
 log_dir = os.path.join("./", "{}{:%Y%m%dT%H%M}".format(
@@ -70,7 +81,7 @@ callbacks = [
             callbacks.TensorBoard(log_dir=log_dir,
                                         histogram_freq=0, write_graph=True, write_images=False),
             callbacks.ModelCheckpoint(checkpoint_path,
-                                            verbose=0, save_weights_only=True, save_best_only=True, mode='max'),
+                                            verbose=0, save_weights_only=True, save_best_only=True, monitor='val_acc', mode='max'),
         ]
 
 model.fit_generator(generator=training_generator,
