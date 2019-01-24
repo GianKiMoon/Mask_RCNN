@@ -5,17 +5,26 @@ import numpy as np
 import cv2
 import synthpod.model as modellib
 
-model = modellib.UNET(nClasses=15,
-              input_height=256,
-              input_width=256)
+#model = modellib.UNET(nClasses=15,
+#              input_height=256,
+#              input_width=256)
 #model = modellib.FCN8(nClasses=15,
 #             input_height=256,
 #             input_width=256)
+model = modellib.ResNet(nClasses=15,
+             input_height=256,
+             input_width=256)
 #model.load_weights('UNET_64_75_Accuracy/mask_rcnn_dp_0057.h5')
-model.load_weights('dp20190115T2139/mask_rcnn_dp_0077.h5')
+
+#model.load_weights('dp20190116T1330/mask_rcnn_dp_0053.h5')
+#model.load_weights('dp20190116T1330/mask_rcnn_dp_0009.h5')
+
+model.load_weights('dp20190118T2029/mask_rcnn_dp_0028.h5')
+
 img2 = cv2.imread("../samples/densepose/test_person3.png")
 img2 = cv2.resize(img2, (256, 256))
-img, ann = util.load_test_img(9)
+img, ann = util.load_test_img(3)#9
+#img2 = np.concatenate([img2, img[:, :, 2:3]], 2)
 #img = img2
 res_img = cv2.resize(img[:, :, 0:3], (1024, 1024))
 
@@ -29,6 +38,7 @@ print("Ann shape",ann.shape)
 # cv2.destroyAllWindows()
 
 #img = np.float32(img) / 127.5 - 1
+
 img = np.expand_dims(img, 0)
 img2 = np.expand_dims(img2, 0)
 print("Image with shape: ", img.shape)

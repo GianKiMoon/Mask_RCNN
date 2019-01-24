@@ -2953,11 +2953,6 @@ class MaskRCNN():
             if 'gamma' not in w.name and 'beta' not in w.name]
         self.keras_model.add_loss(tf.add_n(reg_losses))
 
-        sess = K.get_session()
-        #sess = tf_debug.TensorBoardDebugWrapperSession(tf.Session(),"ntw-424:12345")# LocalCLIDebugWrapperSession(sess)
-        sess = tf_debug.LocalCLIDebugWrapperSession(sess)
-        K.set_session(sess)
-
         # Compile
         self.keras_model.compile(
             optimizer=optimizer,

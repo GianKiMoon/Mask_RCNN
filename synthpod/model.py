@@ -5,11 +5,14 @@ from keras.models import *
 from keras.layers import *
 from keras import optimizers
 from keras.utils import plot_model
-
+import keras.applications.resnet50 as rn50
 import utils as util
+import keras.layers as KL
+import synthpod.loss as loss
 warnings.filterwarnings("ignore")
 
-
+WEIGHTS_PATH = 'https://github.com/fchollet/deep-learning-models/releases/download/v0.2/resnet50_weights_tf_dim_ordering_tf_kernels.h5'
+WEIGHTS_PATH_NO_TOP = 'https://github.com/fchollet/deep-learning-models/releases/download/v0.2/resnet50_weights_tf_dim_ordering_tf_kernels_notop.h5'
 
 VGG_Weights_path = "vgg16_weights_tf_dim_ordering_tf_kernels_notop_new.h5"
 
@@ -301,5 +304,186 @@ def UNET(nClasses, input_height=224, input_width=224):
 
 
     model.outputHeight = outputHeight
+
+    return model
+
+def ResNet(nClasses, input_height=224, input_width=224):
+    ## input_height and width must be devisible by 32 because maxpooling with filter size = (2,2) is operated 5 times,
+    ## which makes the input_height and width 2^5 = 32 times smaller
+    assert input_height % 32 == 0
+    assert input_width % 32 == 0
+    IMAGE_ORDERING = "channels_last"
+
+    model = ResNet50(include_top=False, weights=None, input_tensor=Input(shape=(input_height, input_width, 4)),
+                     input_shape=(input_height, input_width, 4), pooling=None, classes=nClasses)
+
+    print(model.output_shape)
+    return model
+
+def ResNet50(include_top=True, weights='imagenet',
+             input_tensor=None, input_shape=None,
+             pooling=None,
+             classes=1000):
+    """Instantiates the ResNet50 architecture.
+
+    Optionally loads weights pre-trained
+    on ImageNet. Note that when using TensorFlow,
+    for best performance you should set
+    `image_data_format='channels_last'` in your Keras config
+    at ~/.keras/keras.json.
+
+    The model and the weights are compatible with both
+    TensorFlow and Theano. The data format
+    convention used by the model is the one
+    specified in your Keras config file.
+
+    # Arguments
+        include_top: whether to include the fully-connected
+            layer at the top of the network.
+        weights: one of `None` (random initialization),
+              'imagenet' (pre-training on ImageNet),
+              or the path to the weights file to be loaded.
+        input_tensor: optional Keras tensor (i.e. output of `layers.Input()`)
+            to use as image input for the model.
+        input_shape: optional shape tuple, only to be specified
+            if `include_top` is False (otherwise the input shape
+            has to be `(224, 224, 3)` (with `channels_last` data format)
+            or `(3, 224, 224)` (with `channels_first` data format).
+            It should have exactly 3 inputs channels,
+            and width and height should be no smaller than 197.
+            E.g. `(200, 200, 3)` would be one valid value.
+        pooling: Optional pooling mode for feature extraction
+            when `include_top` is `False`.
+            - `None` means that the output of the model will be
+                the 4D tensor output of the
+                last convolutional layer.
+            - `avg` means that global average pooling
+                will be applied to the output of the
+                last convolutional layer, and thus
+                the output of the model will be a 2D tensor.
+            - `max` means that global max pooling will
+                be applied.
+        classes: optional number of classes to classify images
+            into, only to be specified if `include_top` is True, and
+            if no `weights` argument is specified.
+
+    # Returns
+        A Keras model instance.
+
+    # Raises
+        ValueError: in case of invalid argument for `weights`,
+            or invalid input shape.
+    """
+    # Determine proper input shape
+    input_shape = rn50._obtain_input_shape(input_shape,
+                                      default_size=224,
+                                      min_size=197,
+                                      data_format=K.image_data_format(),
+                                      require_flatten=include_top,
+                                      weights=weights)
+
+    if input_tensor is None:
+        img_input = Input(shape=input_shape)
+    else:
+        if not K.is_keras_tensor(input_tensor):
+            img_input = Input(tensor=input_tensor, shape=input_shape)
+        else:
+            img_input = input_tensor
+    if K.image_data_format() == 'channels_last':
+        bn_axis = 3
+    else:
+        bn_axis = 1
+
+    pmask_gt = Input(shape=(64, 64, classes), name="pmask_gt")
+    i_mask_gt = Input(shape=(64, 64, 25), name="i_mask_gt")
+    u_mask_gt = Input(shape=(64, 64, 1), name="u_mask_gt")
+    v_mask_gt = Input(shape=(64, 64, 1), name="v_mask_gt")
+    #iuv_gt = Input(shape=(5, 196), name="iuv_gt")
+
+    x = ZeroPadding2D(padding=(3, 3), name='conv1_pad')(img_input)
+    x = Conv2D(64, (7, 7), strides=(2, 2), padding='valid', name='conv1')(x)
+    x = BatchNormalization(axis=bn_axis, name='bn_conv1')(x)
+    x = Activation('relu')(x)
+    x = MaxPooling2D((3, 3), strides=(2, 2))(x)
+
+    x = rn50.conv_block(x, 3, [64, 64, 256], stage=2, block='a', strides=(1, 1))
+    x = rn50.identity_block(x, 3, [64, 64, 256], stage=2, block='b')
+    x = rn50.identity_block(x, 3, [64, 64, 256], stage=2, block='c')
+
+    x = rn50.conv_block(x, 3, [128, 128, 512], stage=3, block='a')
+    x = rn50.identity_block(x, 3, [128, 128, 512], stage=3, block='b')
+    x = rn50.identity_block(x, 3, [128, 128, 512], stage=3, block='c')
+    x = rn50.identity_block(x, 3, [128, 128, 512], stage=3, block='d')
+
+    #x = rn50.conv_block(x, 3, [256, 256, 1024], stage=4, block='a')
+    #x = rn50.identity_block(x, 3, [256, 256, 1024], stage=4, block='b')
+    #x = rn50.identity_block(x, 3, [256, 256, 1024], stage=4, block='c')
+    #x = rn50.identity_block(x, 3, [256, 256, 1024], stage=4, block='d')
+    #x = rn50.identity_block(x, 3, [256, 256, 1024], stage=4, block='e')
+    #x = rn50.identity_block(x, 3, [256, 256, 1024], stage=4, block='f')
+
+    #x = rn50.conv_block(x, 3, [512, 512, 2048], stage=5, block='a')
+    #x = rn50.identity_block(x, 3, [512, 512, 2048], stage=5, block='b')
+    #x = rn50.identity_block(x, 3, [512, 512, 2048], stage=5, block='c')
+
+    #x = AveragePooling2D((7, 7), name='avg_pool')(x)
+
+    IMAGE_ORDERING = "channels_last"
+
+    o1 = (UpSampling2D((2, 2), data_format=IMAGE_ORDERING))(x)
+    o1 = Dropout(0.5)(o1)
+    o1 = (ZeroPadding2D((1, 1), data_format=IMAGE_ORDERING))(o1)
+    o1 = (Conv2D(128, (3, 3), padding='valid', data_format=IMAGE_ORDERING))(o1)
+    o1 = (BatchNormalization())(o1)
+
+    m = Conv2D(classes, (3, 3), padding='same', data_format=IMAGE_ORDERING)(o1)
+    m = (Activation('softmax'))(m)
+    print("M", m.shape)
+
+    for a in range(4):
+        x = (Conv2D(256, (3, 3), strides=(1, 1), padding="same", data_format=IMAGE_ORDERING))(x)
+        x = (BatchNormalization())(x)
+        x = (Activation('relu'))(x)
+
+    o2 = (UpSampling2D((2, 2), data_format=IMAGE_ORDERING))(x)
+    o2 = Dropout(0.5)(o2)
+    o2 = (ZeroPadding2D((1, 1), data_format=IMAGE_ORDERING))(o2)
+    o2 = (Conv2D(128, (3, 3), padding='valid', data_format=IMAGE_ORDERING))(o2)
+    o2 = (BatchNormalization())(o2)
+
+    i = Conv2D(25, (3, 3), padding='same', data_format=IMAGE_ORDERING)(o2)
+    i = (Activation('softmax'))(i)
+    print("I", i.shape)
+
+    o3 = (UpSampling2D((2, 2), data_format=IMAGE_ORDERING))(x)
+    o3 = Dropout(0.5)(o3)
+    o3 = (ZeroPadding2D((1, 1), data_format=IMAGE_ORDERING))(o3)
+    o3 = (Conv2D(128, (3, 3), padding='valid', data_format=IMAGE_ORDERING))(o3)
+    o3 = (BatchNormalization())(o3)
+
+    u = Conv2D(1, (3, 3), padding='same', data_format=IMAGE_ORDERING)(o3)
+    u = (Activation('sigmoid'))(u)
+    print("U", u.shape)
+
+    o4 = (UpSampling2D((2, 2), data_format=IMAGE_ORDERING))(x)
+    o4 = Dropout(0.5)(o4)
+    o4 = (ZeroPadding2D((1, 1), data_format=IMAGE_ORDERING))(o4)
+    o4 = (Conv2D(128, (3, 3), padding='valid', data_format=IMAGE_ORDERING))(o4)
+    o4 = (BatchNormalization())(o4)
+
+    v = Conv2D(1, (3, 3), padding='same', data_format=IMAGE_ORDERING)(o4)
+    v = (Activation('sigmoid'))(v)
+    print("V", v.shape)
+
+    m_loss = KL.Lambda(lambda rx: loss.m_loss(*rx), name="m_loss")([pmask_gt, m])
+    i_loss = KL.Lambda(lambda rx: loss.i_loss(*rx), name="i_loss")([i_mask_gt, i])
+    u_loss = KL.Lambda(lambda rx: loss.uv_loss(*rx), name="u_loss")([u_mask_gt, u])
+    v_loss = KL.Lambda(lambda rx: loss.uv_loss(*rx), name="v_loss")([v_mask_gt, v])
+
+    inputs = [img_input, pmask_gt, i_mask_gt, u_mask_gt, v_mask_gt]
+    outputs = [m, i, u, v, m_loss, i_loss, u_loss, v_loss]
+
+    # Create model.
+    model = Model(inputs, outputs, name='resnet50_densepose')
 
     return model
