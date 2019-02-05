@@ -1,16 +1,25 @@
 import keras.backend as K
 import keras
 import tensorflow as tf
+from keras.utils import to_categorical
 
 
 def m_loss(x_true, x_pred):
-
-    return K.categorical_crossentropy(x_true, x_pred)
+    return K.mean(K.categorical_crossentropy(x_true, x_pred))
 
 
 def i_loss(i_true, i_pred):
-    i_pred = tf.where(i_true == tf.constant(-1.0), i_true, i_pred)
-    return K.categorical_crossentropy(i_true, i_pred)
+    # # Flat tensors
+    # i_true = tf.reshape(i_true, [-1])
+    # i_pred = tf.reshape(i_pred, [-1])
+    #
+    # # Filter not defined values
+    # idx = tf.where(tf.not_equal(i_true, tf.constant(-1.0)))
+    # i_true = tf.gather(i_true, idx)
+    # i_pred = tf.gather(i_pred, idx)
+
+    return K.mean(K.categorical_crossentropy(i_true, i_pred))
+
 
 def smooth_l1_loss(y_true, y_pred):
     """Implements Smooth-L1 loss.
@@ -21,17 +30,24 @@ def smooth_l1_loss(y_true, y_pred):
     loss = (less_than_one * 0.5 * diff**2) + (1 - less_than_one) * (diff - 0.5)
     return loss
 
-def uv_loss(uv_true, uv_pred):
+
+def uv_loss(uv_true, i_true, uv_pred):
+    uv_true = tf.boolean_mask(uv_true, i_true)
+    uv_pred = tf.boolean_mask(uv_pred, i_true)
     uv_true = tf.reshape(uv_true, [-1])
     uv_pred = tf.reshape(uv_pred, [-1])
-    uv_pred = tf.where(uv_true == tf.constant(-1.0), uv_true, uv_pred)
+
+    idx = tf.where(tf.not_equal(uv_true, tf.constant(-1.0)))
+    uv_true = tf.gather(uv_true, idx)
+    uv_pred = tf.gather(uv_pred, idx)
 
     loss = smooth_l1_loss(uv_true, uv_pred)
     loss = K.switch(tf.size(loss) > 0, K.mean(loss), tf.constant(0.0))
 
     return loss
 
-
+def gps_ap(iuv_true, iuv_pred):
+    return None
 
 
 

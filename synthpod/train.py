@@ -44,7 +44,8 @@ model = modellib.ResNet(nClasses=15,
 model.summary()
 
 # Define optimizer
-#optimizer = optimizers.Adam(lr=0.001)#SGD(lr=0.002, decay=5**(-4), momentum=0.9, nesterov=True)
+#optimizer = optimizers.SGD(lr=model_config.LEARNING_RATE, decay=model_config.WEIGHT_DECAY,
+#                           momentum=model_config.MOMENTUM, nesterov=True)
 optimizer = optimizers.Adam(lr=model_config.LEARNING_RATE)
 
 # Add losses to model
@@ -65,9 +66,7 @@ reg_losses = [regularizers.l2(model_config.WEIGHT_DECAY)(w) / tf.cast(tf.size(w)
 model.add_loss(tf.add_n(reg_losses))
 
 # Compile the model
-model.compile(loss=[None] * len(model.outputs), loss_weights=model_config.LOSS_WEIGHTS,
-              optimizer=optimizer,
-              metrics=['accuracy'])
+model.compile(loss=[None] * len(model.outputs), optimizer=optimizer)
 
 # Add metrics for losses
 for name in model_config.LOSS_NAMES:

@@ -396,8 +396,8 @@ def ResNet50(include_top=True, weights='imagenet',
 
     pmask_gt = Input(shape=(64, 64, classes), name="pmask_gt")
     i_mask_gt = Input(shape=(64, 64, 25), name="i_mask_gt")
-    u_mask_gt = Input(shape=(64, 64, 1), name="u_mask_gt")
-    v_mask_gt = Input(shape=(64, 64, 1), name="v_mask_gt")
+    u_mask_gt = Input(shape=(64, 64, 25), name="u_mask_gt")
+    v_mask_gt = Input(shape=(64, 64, 25), name="v_mask_gt")
     #iuv_gt = Input(shape=(5, 196), name="iuv_gt")
 
     x = ZeroPadding2D(padding=(3, 3), name='conv1_pad')(img_input)
@@ -438,9 +438,8 @@ def ResNet50(include_top=True, weights='imagenet',
 
     m = Conv2D(classes, (3, 3), padding='same', data_format=IMAGE_ORDERING)(o1)
     m = (Activation('softmax'))(m)
-    print("M", m.shape)
 
-    for a in range(4):
+    for a in range(8):
         x = (Conv2D(256, (3, 3), strides=(1, 1), padding="same", data_format=IMAGE_ORDERING))(x)
         x = (BatchNormalization())(x)
         x = (Activation('relu'))(x)
@@ -448,37 +447,34 @@ def ResNet50(include_top=True, weights='imagenet',
     o2 = (UpSampling2D((2, 2), data_format=IMAGE_ORDERING))(x)
     o2 = Dropout(0.5)(o2)
     o2 = (ZeroPadding2D((1, 1), data_format=IMAGE_ORDERING))(o2)
-    o2 = (Conv2D(128, (3, 3), padding='valid', data_format=IMAGE_ORDERING))(o2)
+    o2 = (Conv2D(256, (3, 3), padding='valid', data_format=IMAGE_ORDERING))(o2)
     o2 = (BatchNormalization())(o2)
 
     i = Conv2D(25, (3, 3), padding='same', data_format=IMAGE_ORDERING)(o2)
     i = (Activation('softmax'))(i)
-    print("I", i.shape)
 
     o3 = (UpSampling2D((2, 2), data_format=IMAGE_ORDERING))(x)
     o3 = Dropout(0.5)(o3)
     o3 = (ZeroPadding2D((1, 1), data_format=IMAGE_ORDERING))(o3)
-    o3 = (Conv2D(128, (3, 3), padding='valid', data_format=IMAGE_ORDERING))(o3)
+    o3 = (Conv2D(256, (3, 3), padding='valid', data_format=IMAGE_ORDERING))(o3)
     o3 = (BatchNormalization())(o3)
 
-    u = Conv2D(1, (3, 3), padding='same', data_format=IMAGE_ORDERING)(o3)
+    u = Conv2D(25, (3, 3), padding='same', data_format=IMAGE_ORDERING)(o3)
     u = (Activation('sigmoid'))(u)
-    print("U", u.shape)
 
     o4 = (UpSampling2D((2, 2), data_format=IMAGE_ORDERING))(x)
     o4 = Dropout(0.5)(o4)
     o4 = (ZeroPadding2D((1, 1), data_format=IMAGE_ORDERING))(o4)
-    o4 = (Conv2D(128, (3, 3), padding='valid', data_format=IMAGE_ORDERING))(o4)
+    o4 = (Conv2D(256, (3, 3), padding='valid', data_format=IMAGE_ORDERING))(o4)
     o4 = (BatchNormalization())(o4)
 
-    v = Conv2D(1, (3, 3), padding='same', data_format=IMAGE_ORDERING)(o4)
+    v = Conv2D(25, (3, 3), padding='same', data_format=IMAGE_ORDERING)(o4)
     v = (Activation('sigmoid'))(v)
-    print("V", v.shape)
 
     m_loss = KL.Lambda(lambda rx: loss.m_loss(*rx), name="m_loss")([pmask_gt, m])
     i_loss = KL.Lambda(lambda rx: loss.i_loss(*rx), name="i_loss")([i_mask_gt, i])
-    u_loss = KL.Lambda(lambda rx: loss.uv_loss(*rx), name="u_loss")([u_mask_gt, u])
-    v_loss = KL.Lambda(lambda rx: loss.uv_loss(*rx), name="v_loss")([v_mask_gt, v])
+    u_loss = KL.Lambda(lambda rx: loss.uv_loss(*rx), name="u_loss")([u_mask_gt, i_mask_gt, u])
+    v_loss = KL.Lambda(lambda rx: loss.uv_loss(*rx), name="v_loss")([v_mask_gt, i_mask_gt, v])
 
     inputs = [img_input, pmask_gt, i_mask_gt, u_mask_gt, v_mask_gt]
     outputs = [m, i, u, v, m_loss, i_loss, u_loss, v_loss]

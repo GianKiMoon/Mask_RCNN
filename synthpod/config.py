@@ -5,13 +5,15 @@ class Config:
     }
 
     LOSS_WEIGHTS = {
-        "m_loss": 1.,
-        "i_loss": 1.,
-        "u_loss": 4.,
-        "v_loss": 4.
+        "m_loss": 0.2,
+        "i_loss": 0.5,
+        "u_loss": 8.,
+        "v_loss": 8.
     }
 
     LEARNING_RATE = 0.002
 
     # Weight decay regularization
     WEIGHT_DECAY = 0.0001
+
+    MOMENTUM = 0.9

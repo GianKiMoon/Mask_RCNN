@@ -69,10 +69,11 @@ def interpolate_uvs(dp, seg, map_size=64):
     dp_u = np.array(dp[3, :]).transpose()
     dp_v = np.array(dp[4, :]).transpose()
 
-    xy = np.stack([dp_x, dp_y], 0).transpose()
+    xy = np.stack([dp_x, dp_y], 0).transpose().astype(np.int32)
     xx, yy = np.meshgrid(np.arange(0, map_size, 1), np.arange(0, map_size, 1))
     g = np.vstack([xx.ravel(), yy.ravel()]).transpose()
 
+    grid_ii = np.zeros((64, 64, 25))
     try:
         grid_i = griddata(xy, dp_i, g, method='nearest')
         grid_i = np.reshape(grid_i, [map_size, map_size])
@@ -80,35 +81,76 @@ def interpolate_uvs(dp, seg, map_size=64):
         seg = seg.squeeze()
         grid_i[seg == 0] = 0
 
-        grid_i = to_categorical(grid_i, num_classes=25)
+        grid_ii = to_categorical(grid_i, num_classes=25)
+    except Exception as e:
+        grid_ii[:, :, 0] = np.ones((map_size, map_size))
+    #     print("DP_I ", dp_i)
+    #     print(e)
+    #     grid_ii.fill(-1)
+    #     for n in range(xy.__len__()):
+    #         grid_ii[xy[n, 0], xy[n, 1], dp_i[n]] = 1
 
-        grid_u = griddata(xy, dp_u, g, method='linear')
-        grid_u = np.reshape(grid_u, [map_size, map_size])
-        grid_u[np.isnan(grid_u)] = -1
-        grid_u = np.expand_dims(grid_u, axis=2)
+    grid_uu = np.zeros((64, 64, 25))
+    for j in range(1, 25):
+        xy_j = xy[dp_i == j]
+        dp_u_j = dp_u[dp_i == j]
 
-        grid_v = griddata(xy, dp_v, g, method='linear')
-        grid_v = np.reshape(grid_v, [map_size, map_size])
-        grid_v[np.isnan(grid_v)] = -1
-        grid_v = np.expand_dims(grid_v, axis=2)
+        if xy_j.__len__() >= 4:
+            try:
 
-        # img = cv2.resize(give_color_to_seg_img(seg, 2), (256, 256), interpolation=0)
-        # cv2.imshow('image', img)
-        # cv2.waitKey(0)
-        # cv2.destroyAllWindows()
+                grid_u = griddata(xy_j, dp_u_j, g, method='linear')
+                grid_u = np.reshape(grid_u, [map_size, map_size])
+                grid_u[np.isnan(grid_u)] = -1
+            except Exception as e:
+                grid_u = np.zeros((map_size, map_size))
+                grid_u.fill(-1)
+                for n in range(xy_j.__len__()):
+                    grid_u[xy_j[n, 0], xy_j[n, 1]] = dp_u_j[n]
 
-    except ValueError:  # raised if `y` is empty.
-        # img = cv2.resize(give_color_to_seg_img(seg, 2), (256, 256), interpolation=0)
-        # cv2.imshow('image', img)
-        # cv2.waitKey(0)
-        # cv2.destroyAllWindows()
-        # print (xy, dp_i)
-        grid_i =  np.empty((map_size, map_size, 25))
-        grid_i.fill(-1.0)
-        grid_u = np.empty((map_size, map_size, 1))
-        grid_u.fill(-1.0)
-        grid_v = np.empty((map_size, map_size, 1))
-        grid_v.fill(-1.0)
+        else:
+            grid_u = np.zeros((map_size, map_size))
+            grid_u.fill(-1)
+            for n in range(xy_j.__len__()):
+                grid_u[xy_j[n, 0], xy_j[n, 1]] = dp_u_j[n]
+
+        grid_uu[:, :, j] = grid_u
+
+
+    grid_vv = np.zeros((64, 64, 25))
+    for j in range(1, 25):
+        xy_j = xy[dp_i == j]
+        dp_v_j = dp_v[dp_i == j]
+
+        if xy_j.__len__() >= 4:
+            try:
+
+                grid_v = griddata(xy_j, dp_v_j, g, method='linear')
+                grid_v = np.reshape(grid_v, [map_size, map_size])
+                grid_v[np.isnan(grid_v)] = -1
+            except Exception as e:
+                grid_v = np.zeros((map_size, map_size))
+                grid_v.fill(-1)
+                for n in range(xy_j.__len__()):
+                    grid_v[xy_j[n, 0], xy_j[n, 1]] = dp_v_j[n]
+
+        else:
+            grid_v = np.zeros((map_size, map_size))
+            grid_v.fill(-1)
+            for n in range(xy_j.__len__()):
+                grid_v[xy_j[n, 0], xy_j[n, 1]] = dp_v_j[n]
+
+        grid_vv[:, :, j] = grid_v
+
+
+    # grid_v = griddata(xy, dp_v, g, method='linear')
+    # grid_v = np.reshape(grid_v, [map_size, map_size])
+    # grid_v[np.isnan(grid_v)] = -1
+    # grid_v = np.expand_dims(grid_v, axis=2)
+
+    # img = cv2.resize(give_color_to_seg_img(seg, 2), (256, 256), interpolation=0)
+    # cv2.imshow('image', img)
+    # cv2.waitKey(0)
+    # cv2.destroyAllWindows()
 
 
     # img = cv2.resize(give_color_to_seg_img(outgrid, 25), (256, 256), interpolation=0)
@@ -116,7 +158,7 @@ def interpolate_uvs(dp, seg, map_size=64):
     # cv2.waitKey(0)
     # cv2.destroyAllWindows()
 
-    return grid_i, grid_u, grid_v
+    return grid_ii, grid_uu, grid_vv
 
 
 def get_instance_ids(coco, image_ids):
@@ -125,7 +167,7 @@ def get_instance_ids(coco, image_ids):
         anns = coco.loadAnns(coco.getAnnIds(imgIds=[i], iscrowd=None))
         a = 0
         for ann in anns:
-            if 'dp_masks' in ann:
+            if 'dp_masks' in ann and ann['dp_I'] and ann['dp_U'] and ann['dp_V']:
                 image_instance_ids.append((i, a))
                 a = a + 1
 
@@ -175,7 +217,7 @@ def load_test_img(idx=0):
     img, ann_mask, gt_i_mask, gt_u_mask, gt_v_mask = get_box_image(0, os.path.join(image_dir, coco.imgs[image_id]['file_name']),
                                     anns)
 
-    return img, np.argmax(ann_mask, 2), gt_i_mask, gt_u_mask, gt_v_mask
+    return img, ann_mask, gt_i_mask, gt_u_mask, gt_v_mask
 
 
 def give_color_to_seg_img(seg, n_classes):
@@ -255,8 +297,8 @@ class DataGenerator(keras.utils.Sequence):
         y = np.empty((self.batch_size, *self.dim, self.n_classes))
         #y_dp = np.empty((self.batch_size, 5, 196))
         y_i = np.empty((self.batch_size, *self.dim, 25))
-        y_u = np.empty((self.batch_size, *self.dim, 1))
-        y_v = np.empty((self.batch_size, *self.dim, 1))
+        y_u = np.empty((self.batch_size, *self.dim, 25))
+        y_v = np.empty((self.batch_size, *self.dim, 25))
 
 
         # Generate data
@@ -278,32 +320,35 @@ class DataGenerator(keras.utils.Sequence):
 
             y_v[i, :, :, :] = box_v_mask
 
-        #X, y, y_dp = self.__fliplr(X, y, y_dp, 0.5)
+        X, y, y_i, y_u, y_v = self.__fliplr(X, y, y_i, y_u, y_v, 0.5)
 
         inputs = [X, y, y_i, y_u, y_v]
         outputs = []
 
         return inputs, outputs
 
-    def __fliplr(self, X, y, y_dp, probability):
+    def __fliplr(self, X, y, y_i, y_u, y_v, probability):
         for i in range(X.shape[0]):
             if choices([0, 1], [1-probability, probability]) == 1:
                 X[i, :, :, :] = np.fliplr(X[i, :, :, :])
                 y[i, :, :, :] = np.fliplr(y[i, :, :, :])
+                y_i[i, :, :, :] = np.fliplr(y_i[i, :, :, :])
+                y_u[i, :, :, :] = np.fliplr(y_u[i, :, :, :])
+                y_v[i, :, :, :] = np.fliplr(y_v[i, :, :, :])
 
-                GT_x = y_dp[i, 0, :]
-                GT_y = y_dp[i, 1, :]
-                GT_I = y_dp[i, 2, :]
-                GT_U = y_dp[i, 3, :]
-                GT_V = y_dp[i, 4, :]
-                GT_I, GT_U, GT_V, GT_x, GT_y, _ = self.get_symmetric_densepose(GT_I, GT_U, GT_V, GT_x, GT_y, y[i, :, :, :])
-                y_dp[i, 0, :] = GT_x
-                y_dp[i, 1, :] = GT_y
-                y_dp[i, 2, :] = GT_I
-                y_dp[i, 3, :] = GT_U
-                y_dp[i, 4, :] = GT_V
+                # GT_x = y_dp[i, 0, :]
+                # GT_y = y_dp[i, 1, :]
+                # GT_I = y_dp[i, 2, :]
+                # GT_U = y_dp[i, 3, :]
+                # GT_V = y_dp[i, 4, :]
+                # GT_I, GT_U, GT_V, GT_x, GT_y, _ = self.get_symmetric_densepose(GT_I, GT_U, GT_V, GT_x, GT_y, y[i, :, :, :])
+                # y_dp[i, 0, :] = GT_x
+                # y_dp[i, 1, :] = GT_y
+                # y_dp[i, 2, :] = GT_I
+                # y_dp[i, 3, :] = GT_U
+                # y_dp[i, 4, :] = GT_V
 
-        return X, y, y_dp
+        return X, y, y_i, y_u, y_v
 
     def get_symmetric_densepose(self, I, U, V, x, y, Mask):
         ### This is a function to get the mirror symmetric UV labels.
