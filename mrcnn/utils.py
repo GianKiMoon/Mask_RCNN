@@ -102,8 +102,8 @@ def compute_overlaps_masks(masks1, masks2):
     """
     
     # If either set of masks is empty return empty result
-    if masks1.shape[0] == 0 or masks2.shape[0] == 0:
-        return np.zeros((masks1.shape[0], masks2.shape[-1]))
+    if masks1.shape[-1] == 0 or masks2.shape[-1] == 0:
+        return np.zeros((masks1.shape[-1], masks2.shape[-1]))
     # flatten masks and compute their areas
     masks1 = np.reshape(masks1 > .5, (-1, masks1.shape[-1])).astype(np.float32)
     masks2 = np.reshape(masks2 > .5, (-1, masks2.shape[-1])).astype(np.float32)
@@ -511,9 +511,6 @@ def resize_mask(mask, scale, padding, crop=None):
         mask = np.pad(mask, padding, mode='constant', constant_values=0)
     return mask
 
-def resize_uv(uv, scale, padding):
-
-    return uv
 
 def minimize_mask(bbox, mask, mini_shape):
     """Resize masks to a smaller version to reduce memory load.
@@ -575,23 +572,6 @@ def unmold_mask(mask, bbox, image_shape):
     full_mask = np.zeros(image_shape[:2], dtype=np.bool)
     full_mask[y1:y2, x1:x2] = mask
     return full_mask
-
-
-def unmold_iuv(c_i, r_u, r_v, bbox, image_shape):
-    y1, x1, y2, x2 = bbox
-    c_i = resize(c_i, (y2 - y1, x2 - x1), preserve_range=True, order=0)
-    c_i = np.round(c_i)
-    r_u = resize(r_u, (y2 - y1, x2 - x1))
-    r_v = resize(r_v, (y2 - y1, x2 - x1))
-
-    full_c_i = np.zeros(image_shape[:2], dtype=np.int32)
-    full_r_u = np.zeros(image_shape[:2], dtype=np.float32)
-    full_r_v = np.zeros(image_shape[:2], dtype=np.float32)
-    full_c_i[y1:y2, x1:x2] = c_i
-    full_r_u[y1:y2, x1:x2] = np.squeeze(r_u)
-    full_r_v[y1:y2, x1:x2] = np.squeeze(r_v)
-
-    return full_c_i, full_r_u, full_r_v
 
 
 ############################################################
@@ -714,7 +694,7 @@ def compute_matches(gt_boxes, gt_class_ids, gt_masks,
         # 3. Find the match
         for j in sorted_ixs:
             # If ground truth box is already matched, go to next one
-            if gt_match[j] > 0:
+            if gt_match[j] > -1:
                 continue
             # If we reach IoU smaller than the threshold, end the loop
             iou = overlaps[i, j]

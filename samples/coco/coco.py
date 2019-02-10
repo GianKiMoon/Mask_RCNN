@@ -78,13 +78,13 @@ class CocoConfig(Config):
 
     # We use a GPU with 12GB memory, which can fit two images.
     # Adjust down if you use a smaller GPU.
-    IMAGES_PER_GPU = 2
+    IMAGES_PER_GPU = 1
 
     # Uncomment to train on 8 GPUs (default is 1)
-    # GPU_COUNT = 8
+    GPU_COUNT = 3
 
     # Number of classes (including background)
-    NUM_CLASSES = 1 + 80  # COCO has 80 classes
+    NUM_CLASSES = 1 + 1  # COCO has 80 classes
 
 
 ############################################################
@@ -105,33 +105,36 @@ class CocoDataset(utils.Dataset):
         auto_download: Automatically download and unzip MS-COCO images and annotations
         """
 
-        if auto_download is True:
-            self.auto_download(dataset_dir, subset, year)
-
-        coco = COCO("{}/annotations/instances_{}{}.json".format(dataset_dir, subset, year))
+        coco = COCO("{}/annotations/densepose_coco_2014_{}.json".format(dataset_dir, subset))
         if subset == "minival" or subset == "valminusminival":
             subset = "val"
-        image_dir = "{}/{}{}".format(dataset_dir, subset, year)
+        image_dir = "{}/{}2014".format(dataset_dir, subset)
 
-        # Load all classes or a subset?
-        if not class_ids:
-            # All classes
-            class_ids = sorted(coco.getCatIds())
+        # All images
+        image_ids = list(coco.imgs.keys())
+        print("Loaded a total of {} images".format(image_ids.__len__()))
+        # Add one additional class for persons
+        self.add_class("coco", 1, "person")
 
-        # All images or a subset?
-        if class_ids:
-            image_ids = []
-            for id in class_ids:
-                image_ids.extend(list(coco.getImgIds(catIds=[id])))
-            # Remove duplicates
-            image_ids = list(set(image_ids))
-        else:
-            # All images
-            image_ids = list(coco.imgs.keys())
-
-        # Add classes
-        for i in class_ids:
-            self.add_class("coco", i, coco.loadCats(i)[0]["name"])
+        # # Load all classes or a subset?
+        # if not class_ids:
+        #     # All classes
+        #     class_ids = sorted(coco.getCatIds())
+        #
+        # # All images or a subset?
+        # if class_ids:
+        #     image_ids = []
+        #     for id in class_ids:
+        #         image_ids.extend(list(coco.getImgIds(catIds=[id])))
+        #     # Remove duplicates
+        #     image_ids = list(set(image_ids))
+        # else:
+        #     # All images
+        #     image_ids = list(coco.imgs.keys())
+        #
+        # # Add classes
+        # for i in class_ids:
+        #     self.add_class("coco", i, coco.loadCats(i)[0]["name"])
 
         # Add images
         for i in image_ids:
@@ -141,7 +144,7 @@ class CocoDataset(utils.Dataset):
                 width=coco.imgs[i]["width"],
                 height=coco.imgs[i]["height"],
                 annotations=coco.loadAnns(coco.getAnnIds(
-                    imgIds=[i], catIds=class_ids, iscrowd=None)))
+                    imgIds=[i], iscrowd=None)))
         if return_coco:
             return coco
 
@@ -396,7 +399,7 @@ def evaluate_coco(model, dataset, coco, eval_type="bbox", limit=0, image_ids=Non
 ############################################################
 
 
-if __name__ == '__main__':
+def main(_args):
     import argparse
 
     # Parse command line arguments
@@ -471,7 +474,8 @@ if __name__ == '__main__':
 
     # Load weights
     print("Loading weights ", model_path)
-    model.load_weights(model_path, by_name=True)
+    model.load_weights(model_path, by_name=True,
+                       exclude=["mrcnn_class_logits", "mrcnn_bbox_fc", "mrcnn_bbox", "mrcnn_mask"])
 
     # Train or evaluate
     if args.command == "train":
@@ -479,13 +483,13 @@ if __name__ == '__main__':
         # validation set, as as in the Mask RCNN paper.
         dataset_train = CocoDataset()
         dataset_train.load_coco(args.dataset, "train", year=args.year, auto_download=args.download)
-        if args.year in '2014':
-            dataset_train.load_coco(args.dataset, "valminusminival", year=args.year, auto_download=args.download)
+        # if args.year in '2014':
+        #     dataset_train.load_coco(args.dataset, "valminusminival", year=args.year, auto_download=args.download)
         dataset_train.prepare()
 
         # Validation dataset
         dataset_val = CocoDataset()
-        val_type = "val" if args.year in '2017' else "minival"
+        val_type = "val" if args.year in '2017' else "valminusminival"
         dataset_val.load_coco(args.dataset, val_type, year=args.year, auto_download=args.download)
         dataset_val.prepare()
 
@@ -496,28 +500,28 @@ if __name__ == '__main__':
         # *** This training schedule is an example. Update to your needs ***
 
         # Training - Stage 1
-        print("Training network heads")
-        model.train(dataset_train, dataset_val,
-                    learning_rate=config.LEARNING_RATE,
-                    epochs=40,
-                    layers='heads',
-                    augmentation=augmentation)
-
-        # Training - Stage 2
-        # Finetune layers from ResNet stage 4 and up
-        print("Fine tune Resnet stage 4 and up")
-        model.train(dataset_train, dataset_val,
-                    learning_rate=config.LEARNING_RATE,
-                    epochs=120,
-                    layers='4+',
-                    augmentation=augmentation)
+        # print("Training network heads")
+        # model.train(dataset_train, dataset_val,
+        #             learning_rate=config.LEARNING_RATE,
+        #             epochs=40,
+        #             layers='heads',
+        #             augmentation=augmentation)
+        #
+        # # Training - Stage 2
+        # # Finetune layers from ResNet stage 4 and up
+        # print("Fine tune Resnet stage 4 and up")
+        # model.train(dataset_train, dataset_val,
+        #             learning_rate=config.LEARNING_RATE,
+        #             epochs=120,
+        #             layers='4+',
+        #             augmentation=augmentation)
 
         # Training - Stage 3
         # Fine tune all layers
         print("Fine tune all layers")
         model.train(dataset_train, dataset_val,
                     learning_rate=config.LEARNING_RATE / 10,
-                    epochs=160,
+                    epochs=50,
                     layers='all',
                     augmentation=augmentation)
 
@@ -532,3 +536,7 @@ if __name__ == '__main__':
     else:
         print("'{}' is not recognized. "
               "Use 'train' or 'evaluate'".format(args.command))
+
+
+if __name__ == '__main__':
+    main(sys.argv[1:])

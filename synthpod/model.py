@@ -307,7 +307,7 @@ def UNET(nClasses, input_height=224, input_width=224):
 
     return model
 
-def ResNet(nClasses, input_height=224, input_width=224):
+def ResNet(nClasses, input_height=224, input_width=224, mode="train"):
     ## input_height and width must be devisible by 32 because maxpooling with filter size = (2,2) is operated 5 times,
     ## which makes the input_height and width 2^5 = 32 times smaller
     assert input_height % 32 == 0
@@ -315,7 +315,7 @@ def ResNet(nClasses, input_height=224, input_width=224):
     IMAGE_ORDERING = "channels_last"
 
     model = ResNet50(include_top=False, weights=None, input_tensor=Input(shape=(input_height, input_width, 4)),
-                     input_shape=(input_height, input_width, 4), pooling=None, classes=nClasses)
+                     input_shape=(input_height, input_width, 4), pooling=None, classes=nClasses, mode=mode)
 
     print(model.output_shape)
     return model
@@ -323,7 +323,7 @@ def ResNet(nClasses, input_height=224, input_width=224):
 def ResNet50(include_top=True, weights='imagenet',
              input_tensor=None, input_shape=None,
              pooling=None,
-             classes=1000):
+             classes=1000, mode="train"):
     """Instantiates the ResNet50 architecture.
 
     Optionally loads weights pre-trained
@@ -394,11 +394,14 @@ def ResNet50(include_top=True, weights='imagenet',
     else:
         bn_axis = 1
 
-    pmask_gt = Input(shape=(64, 64, classes), name="pmask_gt")
-    i_mask_gt = Input(shape=(64, 64, 25), name="i_mask_gt")
-    u_mask_gt = Input(shape=(64, 64, 25), name="u_mask_gt")
-    v_mask_gt = Input(shape=(64, 64, 25), name="v_mask_gt")
-    #iuv_gt = Input(shape=(5, 196), name="iuv_gt")
+    print("img input shape ", img_input.shape)
+
+    if mode == "train":
+        pmask_gt = Input(shape=(64, 64, classes), name="pmask_gt")
+        i_mask_gt = Input(shape=(64, 64, 25), name="i_mask_gt")
+        u_mask_gt = Input(shape=(64, 64, 25), name="u_mask_gt")
+        v_mask_gt = Input(shape=(64, 64, 25), name="v_mask_gt")
+        #iuv_gt = Input(shape=(5, 196), name="iuv_gt")
 
     x = ZeroPadding2D(padding=(3, 3), name='conv1_pad')(img_input)
     x = Conv2D(64, (7, 7), strides=(2, 2), padding='valid', name='conv1')(x)
@@ -471,15 +474,22 @@ def ResNet50(include_top=True, weights='imagenet',
     v = Conv2D(25, (3, 3), padding='same', data_format=IMAGE_ORDERING)(o4)
     v = (Activation('sigmoid'))(v)
 
-    m_loss = KL.Lambda(lambda rx: loss.m_loss(*rx), name="m_loss")([pmask_gt, m])
-    i_loss = KL.Lambda(lambda rx: loss.i_loss(*rx), name="i_loss")([i_mask_gt, i])
-    u_loss = KL.Lambda(lambda rx: loss.uv_loss(*rx), name="u_loss")([u_mask_gt, i_mask_gt, u])
-    v_loss = KL.Lambda(lambda rx: loss.uv_loss(*rx), name="v_loss")([v_mask_gt, i_mask_gt, v])
+    inputs = []
+    outputs = []
 
-    inputs = [img_input, pmask_gt, i_mask_gt, u_mask_gt, v_mask_gt]
-    outputs = [m, i, u, v, m_loss, i_loss, u_loss, v_loss]
+    if mode == "train":
+        m_loss = KL.Lambda(lambda rx: loss.m_loss(*rx), name="m_loss")([pmask_gt, m])
+        i_loss = KL.Lambda(lambda rx: loss.i_loss(*rx), name="i_loss")([i_mask_gt, i])
+        u_loss = KL.Lambda(lambda rx: loss.uv_loss(*rx), name="u_loss")([u_mask_gt, i_mask_gt, u])
+        v_loss = KL.Lambda(lambda rx: loss.uv_loss(*rx), name="v_loss")([v_mask_gt, i_mask_gt, v])
+
+        inputs = [img_input, pmask_gt, i_mask_gt, u_mask_gt, v_mask_gt]
+        outputs = [m, i, u, v, m_loss, i_loss, u_loss, v_loss]
+    elif mode == "inference":
+        inputs = [img_input]
+        outputs = [m, i, u, v]
 
     # Create model.
-    model = Model(inputs, outputs, name='resnet50_densepose')
+    model = Model(inputs, outputs, name='resnet50_densepose_{}'.format(mode))
 
     return model

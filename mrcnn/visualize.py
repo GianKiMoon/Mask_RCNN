@@ -80,11 +80,11 @@ def apply_mask(image, mask, color, alpha=0.5):
     return image
 
 
-def display_instances(image, boxes, masks, c_i, r_u, r_v, class_ids, class_names,
+def display_instances(image, boxes, masks, class_ids, class_names,
                       scores=None, title="",
                       figsize=(16, 16), ax=None,
                       show_mask=True, show_bbox=True,
-                      colors=None, captions=None, part_ind=0):
+                      colors=None, captions=None):
     """
     boxes: [num_instance, (y1, x1, y2, x2, class_id)] in image coordinates.
     masks: [height, width, num_instances]
@@ -120,7 +120,7 @@ def display_instances(image, boxes, masks, c_i, r_u, r_v, class_ids, class_names
     ax.axis('off')
     ax.set_title(title)
 
-    masked_image = np.zeros_like(image.astype(np.uint32).copy())
+    masked_image = image.astype(np.uint32).copy()
     for i in range(N):
         color = colors[i]
 
@@ -140,30 +140,16 @@ def display_instances(image, boxes, masks, c_i, r_u, r_v, class_ids, class_names
             class_id = class_ids[i]
             score = scores[i] if scores is not None else None
             label = class_names[class_id]
-            x = random.randint(x1, (x1 + x2) // 2)
             caption = "{} {:.3f}".format(label, score) if score else label
         else:
             caption = captions[i]
         ax.text(x1, y1 + 8, caption,
                 color='w', size=11, backgroundcolor="none")
 
-        show_mask = False
-
         # Mask
         mask = masks[:, :, i]
         if show_mask:
             masked_image = apply_mask(masked_image, mask, color)
-
-        cl = random_colors(25)
-        c_i_inst = c_i[:, :, i]
-        # for j in range(20, 24):
-        #     c_i_inst_cl = np.where(c_i_inst == j+1, np.ones(c_i_inst.shape, dtype=np.bool),
-        #                         np.zeros(c_i_inst.shape, dtype=np.bool))
-        #     masked_image = apply_mask(masked_image, c_i_inst_cl, cl[j])
-
-        c_i_inst_cl = np.where(c_i_inst == part_ind, np.ones(c_i_inst.shape, dtype=np.bool),
-                               np.zeros(c_i_inst.shape, dtype=np.bool))
-        masked_image = apply_mask(masked_image, c_i_inst_cl, cl[0])
 
         # Mask Polygon
         # Pad to ensure proper polygons for masks that touch image edges.
@@ -449,7 +435,6 @@ def draw_boxes(image, boxes=None, refined_boxes=None,
             # If there are refined boxes, display captions on them
             if refined_boxes is not None:
                 y1, x1, y2, x2 = ry1, rx1, ry2, rx2
-            x = random.randint(x1, (x1 + x2) // 2)
             ax.text(x1, y1, caption, size=11, verticalalignment='top',
                     color='w', backgroundcolor="none",
                     bbox={'facecolor': color, 'alpha': 0.5,
