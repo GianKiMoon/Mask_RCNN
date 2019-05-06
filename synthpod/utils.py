@@ -13,12 +13,20 @@ from scipy.interpolate import griddata # not quite the same as `matplotlib.mlab.
 from keras.utils.np_utils import to_categorical
 
 def load_densepose_coco(dataset_dir, subset, return_coco=True):
-    coco = COCO("{}/annotations/densepose_coco_2014_{}.json".format(dataset_dir, subset))
-    if subset == "minival" or subset == "valminusminival":
-        subset = "val"
-    image_dir = "{}/{}2014".format(dataset_dir, subset)
 
-    image_ids = list(coco.imgs.keys())
+    if subset == "synthdense_train":
+        coco = COCO("{}/train_dataset/annotations/synthdense_annotations.json".format(dataset_dir))
+        image_dir = "{}/train_dataset/train".format(dataset_dir)
+    elif subset == "synthdense_val":
+        coco = COCO("{}/val_dataset/annotations/synthdense_annotations.json".format(dataset_dir))
+        image_dir = "{}/val_dataset/train".format(dataset_dir)
+    else:
+        coco = COCO("{}/annotations/densepose_coco_2014_{}.json".format(dataset_dir, subset))
+        if subset == "minival" or subset == "valminusminival":
+            subset = "val"
+        image_dir = "{}/{}2014".format(dataset_dir, subset)
+
+        image_ids = list(coco.imgs.keys())
 
     if return_coco:
         return coco, image_dir
@@ -39,6 +47,43 @@ def get_dense_pose_mask(polys):
     seg = np.expand_dims(seg, 2)
     return mask_gen, seg
 
+
+def get_fake_dense_pose_mask(dp_i, seg):
+    dp_i = np.argmax(dp_i, 2)
+    dp_mask = np.zeros((64, 64, 15))
+
+    dp_mask[dp_i == 1, 1] = 1
+    dp_mask[dp_i == 2, 1] = 1
+    dp_mask[dp_i == 3, 2] = 1
+    dp_mask[dp_i == 4, 3] = 1
+    dp_mask[dp_i == 5, 4] = 1
+    dp_mask[dp_i == 6, 5] = 1
+    dp_mask[dp_i == 7, 6] = 1
+    dp_mask[dp_i == 9, 6] = 1
+    dp_mask[dp_i == 8, 7] = 1
+    dp_mask[dp_i == 10, 7] = 1
+    dp_mask[dp_i == 11, 8] = 1
+    dp_mask[dp_i == 13, 8] = 1
+    dp_mask[dp_i == 12, 9] = 1
+    dp_mask[dp_i == 14, 9] = 1
+    dp_mask[dp_i == 15, 10] = 1
+    dp_mask[dp_i == 17, 10] = 1
+    dp_mask[dp_i == 16, 11] = 1
+    dp_mask[dp_i == 18, 11] = 1
+    dp_mask[dp_i == 19, 12] = 1
+    dp_mask[dp_i == 21, 12] = 1
+    dp_mask[dp_i == 20, 13] = 1
+    dp_mask[dp_i == 22, 13] = 1
+    dp_mask[dp_i == 23, 14] = 1
+    dp_mask[dp_i == 24, 14] = 1
+
+    seg = np.invert(np.squeeze(seg).astype(np.bool))
+    seg = seg.astype(np.uint8)
+    dp_mask[:, :, 0] = seg
+
+    return dp_mask.astype(np.uint8)
+
+
 def get_dense_pose_uv(ann, seg):
     scaling_factor_for_pooling = 0.25  # 0.234375 #30:  0.1171875 # Hardcoded to output mask
     dp_I = np.array(ann['dp_I'])
@@ -46,8 +91,12 @@ def get_dense_pose_uv(ann, seg):
     dp_V = np.array(ann['dp_V'])
     # Scale xy coords to output mask of network for loss pooling
     dp_x = np.array(ann['dp_x'])
+    dp_x[dp_x > 255] = 255
+    dp_x[dp_x < 0] = 0
     dp_x = np.multiply(dp_x, scaling_factor_for_pooling).astype(np.int32)
     dp_y = np.array(ann['dp_y'])
+    dp_y[dp_y > 255] = 255
+    dp_y[dp_y < 0] = 0
     dp_y = np.multiply(dp_y, scaling_factor_for_pooling).astype(np.int32)
 
     dp = np.stack([dp_x, dp_y, dp_I, dp_U, dp_V], axis=0)
@@ -190,23 +239,66 @@ def get_box_image(instance_idx, img_path=None, anns=None):
                 box_img = img[y1:y2, x1:x2, :]
                 box_img = cv2.resize(box_img, (256, 256))
 
-                # if not ann['dp_I']:
-                #     cv2.imshow('image', box_img)
-                #     cv2.waitKey(0)
-                #     cv2.destroyAllWindows()
+                # cv2.imshow('image', box_img)
+                # cv2.waitKey(0)
+                # cv2.destroyAllWindows()
 
                 # Center images to interval [-1, 1]
                 box_img = np.float32(box_img) / 127.5 - 1
 
-                dp_mask, seg = get_dense_pose_mask(ann['dp_masks'])
-                dp_mask = dp_mask[0::4, 0::4, :]
+                dp_mask = []
+
+                if ann['dp_masks']:
+                    dp_mask, seg = get_dense_pose_mask(ann['dp_masks'])
+                    dp_mask = dp_mask[0::4, 0::4, :]
+                else:
+                    rle = annToRLE(ann, img.shape[0], img.shape[1])
+                    seg = maskUtils.decode(rle)
+                    seg = seg[y1:y2, x1:x2]
+                    seg = np.expand_dims(cv2.resize(seg, (256, 256), interpolation=0), 2)
+
+
+                # cv2.imshow('image', give_color_to_seg_img(seg, 2))
+                # cv2.waitKey(0)
+                # cv2.destroyAllWindows()
+
                 box_img = np.concatenate([box_img, seg], 2)
 
+
                 gt_i_mask, gt_u_mask, gt_v_mask = get_dense_pose_uv(ann, seg)
+
+                if not ann['dp_masks']:
+                    seg_sub = seg[0::4, 0::4, :]
+                    dp_mask = get_fake_dense_pose_mask(gt_i_mask, seg_sub)
+
+                # cv2.imshow('image', cv2.resize(give_color_to_seg_img(np.argmax(dp_mask, 2), 15), (256, 256), interpolation=0))
+                # cv2.waitKey(0)
+                # cv2.destroyAllWindows()
+
                 return box_img, dp_mask, gt_i_mask, gt_u_mask, gt_v_mask
             idx += 1
 
     return None
+
+
+def annToRLE(ann, height, width):
+    """
+    Convert annotation which can be polygons, uncompressed RLE to RLE.
+    :return: binary mask (numpy 2D array)
+    """
+    segm = ann['segmentation']
+    if isinstance(segm, list):
+        # polygon -- a single object might consist of multiple parts
+        # we merge all parts into one mask rle code
+        rles = maskUtils.frPyObjects(segm, height, width)
+        rle = maskUtils.merge(rles)
+    elif isinstance(segm['counts'], list):
+        # uncompressed RLE
+        rle = maskUtils.frPyObjects(segm, height, width)
+    else:
+        # rle
+        rle = ann['segmentation']
+    return rle
 
 
 def load_test_img(idx=0):

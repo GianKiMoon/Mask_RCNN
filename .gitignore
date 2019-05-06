@@ -2,6 +2,7 @@
 datasets/
 logs/
 *.h5
+*.ntw-424
 results/
 temp/
 test/
@@ -56,3 +57,5 @@ pip-delete-this-directory.txt
 .venv
 venv/
 ENV/
+
+*.png

@@ -22,7 +22,9 @@ print("keras version {}".format(keras.__version__)); del keras
 print("tensorflow version {}".format(tf.__version__))
 
 # Path to coco folder
+
 dataset_path = "../datasets/coco"
+#dataset_path = "../datasets/synthdense"
 
 # Directory for training logs
 log_dir = os.path.join("./", "{}{:%Y%m%dT%H%M}".format("dp", datetime.datetime.now()))
@@ -80,8 +82,13 @@ for name in model_config.LOSS_NAMES:
     model.metrics_tensors.append(loss)
 
 # Save model file for inspection
-model.save("resnet.h5")
+#model.save("resnet.h5")
 
+model.load_weights("dp20190213T1225/mask_rcnn_dp_0010.h5", by_name=True)
+
+# load synthdense
+#coco_train, train_image_dir = util.load_densepose_coco(dataset_path, subset="synthdense_train")
+#coco_val, val_image_dir = util.load_densepose_coco(dataset_path, subset="synthdense_val")
 # Load coco instance ids
 coco_train, train_image_dir = util.load_densepose_coco(dataset_path, subset="train")
 coco_val, val_image_dir = util.load_densepose_coco(dataset_path, subset="valminusminival")
@@ -93,7 +100,7 @@ print("Using {} train instances and {} val instances.".format(train_instance_ids
 
 # Define data generator parameters
 params = {'dim': (64, 64),
-          'batch_size': 16,
+          'batch_size': 16, # !!! change back to 16
           'n_classes': 15,
           'n_channels': 4,
           'shuffle': True}
@@ -118,7 +125,7 @@ model.fit_generator(generator=training_generator,
                    callbacks=callbacks,
                    use_multiprocessing=False,
                    workers=1,
-                   epochs=200)
+                   epochs=100)
 
 '''
 hist1 = model.fit(X_train,y_train,
